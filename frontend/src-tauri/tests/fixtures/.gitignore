@@ -1,0 +1,2 @@
+# Keep this small, required test fixture despite the repository's *.wav rule.
+!jfk.wav

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. **Frontend**: Tauri-based desktop application (Rust + Next.js + TypeScript)
 2. **Rust Backend**: Tauri commands, audio capture, transcription, storage, and summarization orchestration
-3. **Legacy Backend Archive**: the old Python/FastAPI, Docker, and standalone whisper-server backend under `backend/` is archived and unsupported
+3. **Historical Backend**: the old Python/FastAPI, Docker, and standalone whisper-server backend was removed from the working tree on 2026-10-14; see `docs/ARCHIVE_CLEANUP_2026-10-14.md` for scope and recovery
 
 ### Key Technology Stack
 - **Desktop App**: Tauri 2.x (Rust) + Next.js 14 + React 18
@@ -46,13 +46,14 @@ pnpm run tauri:dev:vulkan   # AMD/Intel Vulkan
 pnpm run tauri:dev:cpu      # CPU-only (no GPU)
 ```
 
-### Legacy Backend Archive
+### Historical Backend
 
-**Location**: `/backend`
-
-The Python/FastAPI backend, Docker setup, and standalone whisper-server scripts are archived for historical reference and migration context only. Do not use them for current development, new installs, production deployments, or issue triage for the supported app.
-
-The archived FastAPI service had unauthenticated, development-oriented CORS behavior. Treat that behavior as obsolete legacy context, not as a supported production API.
+The Python/FastAPI backend, Docker setup, standalone whisper-server, and unused
+Rust audio prototypes were removed from the working tree on 2026-10-14.
+See [the cleanup record](docs/ARCHIVE_CLEANUP_2026-10-14.md) for the deletion
+manifest, backup, and compatibility code intentionally retained. Historical
+tracked sources remain available at the baseline Git commit. Do not restore
+this backend as a prerequisite for supported development or new features.
 
 ### Service Endpoints
 - **Frontend Dev**: http://localhost:3118
@@ -98,7 +99,7 @@ Raw Audio (Mic + System)
 
 ### Audio Device Modularization (Recently Completed)
 
-**Context**: The audio system was refactored from a monolithic 1028-line `core.rs` file into focused modules. See [AUDIO_MODULARIZATION_PLAN.md](AUDIO_MODULARIZATION_PLAN.md) for details.
+**Context**: The audio system was refactored from a monolithic 1028-line `core.rs` file into focused modules. The current module boundary is defined in [audio/mod.rs](frontend/src-tauri/src/audio/mod.rs).
 
 ```
 audio/
@@ -290,7 +291,7 @@ RUST_LOG=app_lib::audio=debug ./clean_run.sh
 
 Current app behavior should be implemented in the Rust/Tauri core, not in the archived Python backend. Add new frontend-facing behavior through Tauri commands/events and existing Rust services under `frontend/src-tauri/src`.
 
-Do not add new endpoints to `backend/app/main.py`; that FastAPI code is legacy archive material only.
+Add application capabilities to the Rust/Tauri core. The historical FastAPI tree has been removed; a new local automation gateway must use shared Rust services.
 
 ## Testing and Debugging
 

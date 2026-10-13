@@ -1,0 +1,164 @@
+{
+  "baseline": "a2cb62e827da7ef59f65064c97233efb2313878e",
+  "submodule": "d682e150908e10caa4c15883c633d7902d385237",
+  "archive_sha256": "8aa4dffaef083a4482ca92f14eaa4ca885fb252a15074b869f22cf7f40e0ae2b",
+  "archive_bytes": 9889117,
+  "records": [
+    {
+      "path": "backend",
+      "action": "remove",
+      "tracked_paths": 41
+    },
+    {
+      "path": ".gitmodules",
+      "action": "remove",
+      "tracked_paths": 1
+    },
+    {
+      "path": "frontend/API.md",
+      "action": "remove",
+      "tracked_paths": 1
+    },
+    {
+      "path": "frontend/build_backup.bat",
+      "action": "remove",
+      "tracked_paths": 1
+    },
+    {
+      "path": "frontend/vs_buildtools.exe",
+      "action": "remove",
+      "tracked_paths": 1
+    },
+    {
+      "path": "frontend/src-tauri/CLEANUP_PLAN.md",
+      "action": "remove",
+      "tracked_paths": 1
+    },
+    {
+      "path": "frontend/src-tauri/config/backend_config.json",
+      "action": "remove",
+      "tracked_paths": 1
+    },
+    {
+      "path": "frontend/src-tauri/src/audio/core-old.rs",
+      "action": "remove",
+      "tracked_paths": 1
+    },
+    {
+      "path": "frontend/src-tauri/src/audio/recording_commands.rs.backup",
+      "action": "remove",
+      "tracked_paths": 1
+    },
+    {
+      "path": "frontend/src-tauri/src/audio/recording_saver_old.rs",
+      "action": "remove",
+      "tracked_paths": 1
+    },
+    {
+      "path": "frontend/src-tauri/src/audio/stt.rs",
+      "action": "remove",
+      "tracked_paths": 1
+    },
+    {
+      "path": "frontend/src-tauri/src/audio_v2",
+      "action": "remove",
+      "tracked_paths": 9
+    },
+    {
+      "path": "frontend/src-tauri/src/lib_old_complex.rs",
+      "action": "remove",
+      "tracked_paths": 1
+    },
+    {
+      "path": "CLAUDE.md",
+      "action": "modify",
+      "tracked_paths": 1
+    },
+    {
+      "path": "frontend/README.md",
+      "action": "modify",
+      "tracked_paths": 1
+    },
+    {
+      "path": "frontend/package.json",
+      "action": "modify",
+      "tracked_paths": 1
+    },
+    {
+      "path": "frontend/src-tauri/src/audio/import.rs",
+      "action": "modify",
+      "tracked_paths": 1
+    }
+  ],
+  "deleted_tracked_paths": [
+    ".gitmodules",
+    "backend/.gitignore",
+    "backend/API_DOCUMENTATION.md",
+    "backend/Dockerfile.app",
+    "backend/Dockerfile.server-cpu",
+    "backend/Dockerfile.server-gpu",
+    "backend/Dockerfile.server-macos",
+    "backend/README.md",
+    "backend/SCRIPTS_DOCUMENTATION.md",
+    "backend/app/db.py",
+    "backend/app/main.py",
+    "backend/app/schema_validator.py",
+    "backend/app/transcript_processor.py",
+    "backend/build-docker.ps1",
+    "backend/build-docker.sh",
+    "backend/build_whisper.cmd",
+    "backend/build_whisper.sh",
+    "backend/clean_start_backend.cmd",
+    "backend/clean_start_backend.sh",
+    "backend/debug_cors.py",
+    "backend/docker-compose.yml",
+    "backend/docker/entrypoint.sh",
+    "backend/download-ggml-model.cmd",
+    "backend/download-ggml-model.sh",
+    "backend/examples/run_summary_workflow.py",
+    "backend/install_dependancies_for_windows.ps1",
+    "backend/requirements.txt",
+    "backend/run-docker.ps1",
+    "backend/run-docker.sh",
+    "backend/set_env.sh",
+    "backend/setup-db.ps1",
+    "backend/setup-db.sh",
+    "backend/start_python_backend.cmd",
+    "backend/start_whisper_server.cmd",
+    "backend/start_with_output.ps1",
+    "backend/temp.env",
+    "backend/whisper-custom/server/CMakeLists.txt",
+    "backend/whisper-custom/server/README.md",
+    "backend/whisper-custom/server/httplib.h",
+    "backend/whisper-custom/server/public/index.html",
+    "backend/whisper-custom/server/server.cpp",
+    "backend/whisper.cpp",
+    "frontend/API.md",
+    "frontend/build_backup.bat",
+    "frontend/src-tauri/CLEANUP_PLAN.md",
+    "frontend/src-tauri/config/backend_config.json",
+    "frontend/src-tauri/src/audio/core-old.rs",
+    "frontend/src-tauri/src/audio/recording_commands.rs.backup",
+    "frontend/src-tauri/src/audio/recording_saver_old.rs",
+    "frontend/src-tauri/src/audio/stt.rs",
+    "frontend/src-tauri/src/audio_v2/compatibility.rs",
+    "frontend/src-tauri/src/audio_v2/lib.rs",
+    "frontend/src-tauri/src/audio_v2/limiter.rs",
+    "frontend/src-tauri/src/audio_v2/mixer.rs",
+    "frontend/src-tauri/src/audio_v2/normalizer.rs",
+    "frontend/src-tauri/src/audio_v2/recorder.rs",
+    "frontend/src-tauri/src/audio_v2/resampler.rs",
+    "frontend/src-tauri/src/audio_v2/stream.rs",
+    "frontend/src-tauri/src/audio_v2/sync.rs",
+    "frontend/src-tauri/src/lib_old_complex.rs",
+    "frontend/vs_buildtools.exe"
+  ],
+  "validation": {
+    "node_tests_passed": 14,
+    "existing_migrations_unchanged": 10,
+    "wav_duration_seconds": 11.0,
+    "fixture_hashes_match_backup": true,
+    "native_tests": "blocked: offline ffmpeg-sidecar Git cache unavailable",
+    "rust_metadata": "passed with 2 pre-existing workspace warnings"
+  }
+}
