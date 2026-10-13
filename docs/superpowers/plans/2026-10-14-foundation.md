@@ -10,6 +10,8 @@
 
 **Spec:** [内部增强版落地设计](../specs/2026-10-14-internal-enhancement-design.md)。必须同时阅读；本文都是未来实施任务，本次未执行。
 
+**执行优先级：** P0 → P3 → P4 → P1 → P2；P1/P2最后实施，编号仅作工作包标识。
+
 ## Global Constraints
 
 - 内部自用，覆盖 Pro 核心能力，不做收费授权。

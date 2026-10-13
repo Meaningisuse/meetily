@@ -10,6 +10,8 @@
 
 **Spec:** [内部增强版落地设计](../specs/2026-10-14-internal-enhancement-design.md)。必须同时阅读；本文都是未来实施任务，本次未执行。
 
+**执行优先级：** P0 → P3 → P4 → P1 → P2；P1/P2最后实施，编号仅作工作包标识。
+
 ## Global Constraints
 
 - 内部自用，覆盖 Pro 核心能力，不做收费授权。
@@ -40,34 +42,33 @@
 - [ ] 数据迁移包含clients/webhooks/events/deliveries及automation_requests；secret_ref真实keychain写入成功才提交，失败清理孤立secret。
 - [ ] 验证第二次启动/占用端口/过期pid/强制退出恢复；提交 `feat: add opt-in authenticated local automation gateway`。
 
-## Task A2：只读API与异步导出
+## Task A2：只读API（导出接入后置到P2 E3）
 
-**Files:** 新增 `automation/{routes,read_service,export_routes}.rs`；修改MeetingDocumentService/repositories只加分页读方法，不直接暴露Setting。
+**Files:** 新增 `automation/{routes,read_service}.rs`；`export_routes.rs`在P2 E3新增；修改MeetingDocumentService/repositories只加分页读方法，不直接暴露Setting。
 
-**Interfaces:** 设计的GET meetings/search/transcript/summary/jobs和POST exports/GET artifact download；`MeetingReadService::{list,search,transcript,summary}` 消费 `Page<T>` 和固定cursor。
+**Interfaces:** 先实现GET meetings/search/transcript/summary/jobs；POST exports/GET artifact download在P2 E3实现；`MeetingReadService::{list,search,transcript,summary}` 消费 `Page<T>` 和固定cursor。
 
 - [ ] 写 `automation::tests::pagination_is_stable_and_search_is_bounded`：同created_at多meeting、251segments、删除某条后继续分页，不重复同条；q>256拒绝，snippet≤300，SQL参数化。
-- [ ] 写 `automation::tests::read_scope_cannot_read_keys_audio_or_paths`：不存在settings/key/audio/任意path接口；恶意export body带path拒绝；artifact owner匹配。
-- [ ] 写 `automation::tests::export_job_reports_committed_version`：202返回job，完成后artifact版本等于snapshot，源变更不混合；过期下载404。
+- [ ] 写 `automation::tests::read_scope_cannot_read_keys_audio_or_paths`：不存在settings/key/audio/任意path接口；export路由未注册，health capabilities不含export。
 - [ ] 各filter先失败后实现routes：现有LIKE搜索先复用，参数转义 `%`/`_` 的语义明确；若容量压力实测存在才加FTS。
-- [ ] REST contract fixture与Rust/TS一致；官方接口兼容不作为验收；提交 `feat: expose bounded meeting reads and export jobs`。
+- [ ] REST contract fixture与Rust/TS一致；官方接口兼容不作为验收；提交 `feat: expose bounded meeting reads`。
 
 ## Task A3：CLI和MCP实接
 
 **Files:** 新增 `automation-client/{package.json,tsconfig.json,src/{contracts,connection,http,cli,mcp}.ts,tests/{cli,mcp,connection}.test.ts}`、该包锁文件；新增 `docs/INTERNAL_AUTOMATION.md`。修改CI仅增加此包检查。
 
-**Interfaces:** `AutomationClient::{listMeetings,searchMeetings,getTranscript,getSummary,exportMeeting,getJob}`；CLI `meetily-internal`与设计退出码；MCP六个read tools，不注册delete或shell。
+**Interfaces:** `AutomationClient::{listMeetings,searchMeetings,getTranscript,getSummary,getJob}`；CLI `meetily-internal`与设计退出码；MCP五个read tools，不注册delete或shell。
 
-- [ ] 用stub HTTP服务写 `connection_rejects_stale_instance_and_missing_token`、`cli_uses_stderr_and_exact_exit_codes`、`mcp_stdout_contains_only_protocol`；大结果分页不自动无限拉取。
+- [ ] 用stub HTTP服务写 `connection_rejects_stale_instance_and_missing_token`、`cli_uses_stderr_and_exact_exit_codes`、`mcp_stdout_contains_only_protocol`；大结果分页不自动无限拉取；`mcp_tools_exclude_export_before_capability`验证未实现的导出工具不注册。
 - [ ] 在新包 `pnpm --dir automation-client test` 先失败，再实现连接、keychain/环境变量凭据、CLI/MCP DTO；MCP SDK版本和协议版本在fixture固定。
-- [ ] 手动配置实际内部使用的一个助手，调用搜索→定位时间片段→摘要→导出，关桌面程序后明确不可用；配置只由用户选择，不自动覆盖外部配置。
+- [ ] 手动配置实际内部使用的一个助手，调用搜索→定位时间片段→摘要读取→任务状态，关桌面程序后明确不可用；配置只由用户选择，不自动覆盖外部配置。
 - [ ] 凭据不在命令行argv/示例文档，实例退出码3，授权错误4；契约/类型检查通过；提交 `feat: add internal CLI and MCP meeting tools`。
 
 ## Task A4：独立write/record权限与幂等
 
 **Files:** 新增 `automation/{write_routes,recording_routes,idempotency}.rs`；修改 `summary/commands.rs`、`audio/recording_commands.rs`、`lib.rs`中的录音封装，CLI可选命令和AutomationSettings。
 
-**Interfaces:** 设计POST summary-jobs、cancel、recordings/start-stop；调用P0 JobService和共享 `RecordingService::start(request)->RecordingSession`、`stop(session_id)->RecordingStopResult`。桌面/tray/API共用一个状态机；不保留独立RECORDING_FLAG与API状态双写。
+**Interfaces:** 设计POST summary-jobs、cancel、recordings/start-stop；summary-jobs沿用现有模板loader，冻结模板内容，不依赖P1 CRUD或偏好表；调用P0 JobService和共享 `RecordingService::start(request)->RecordingSession`、`stop(session_id)->RecordingStopResult`。桌面/tray/API共用一个状态机；不保留独立RECORDING_FLAG与API状态双写。
 
 - [ ] 写 `automation::tests::scope_separation_and_idempotency`：read无法write/record；write无法录音；同key同body返回同session/job；同key不同body409。
 - [ ] 写 `automation::tests::record_stop_cannot_stop_new_session`：旧session重复stop不能停刚开始的新录音；UI看到API状态，tray和设备一致。
@@ -87,4 +88,4 @@
 - [ ] 先运行filter，再实现10s timeout、固定退避、2xx成功/4295xx重试/其他4xx终止、16KiB响应限制、正文禁日志；接收端示例按event_id唯一键落库。
 - [ ] 用本地接收服务模拟超时/500/401/重复投递，记录签名读回与平台接收分别验收；提交 `feat: add durable signed meeting webhooks`。
 
-**P3阶段完成条件：** A1–A3为只读首版8–12人日；A4–A5为5–8人日增量。speaker rename route等P4服务完成后再注册。源码默认关闭、实接助手、授权和撤销、事件接收都有证据。
+**P3阶段完成条件：** A1–A3先交付读取、检索、任务状态和实际助手连接；A4–A5交付写入/录音/Webhook。原8–12人日预算包含导出接入，该部分移到P2 E3，不重复计入P2原预算；无导出首版的阶段估算在P0基线后校准。A4–A5仍粗估5–8人日。speaker rename route和diarization.completed由P4完成后接入，导出路由/CLI/MCP工具在P2 E3接入，两者都不阻塞P3独立验收。

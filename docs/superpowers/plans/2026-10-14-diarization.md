@@ -10,6 +10,8 @@
 
 **Spec:** [内部增强版落地设计](../specs/2026-10-14-internal-enhancement-design.md)。必须同时阅读；本文都是未来实施任务，本次未执行。
 
+**执行优先级：** P0 → P3 → P4 → P1 → P2；P1/P2最后实施，编号仅作工作包标识。
+
 ## Global Constraints
 
 - 内部自用，覆盖 Pro 核心能力，不做收费授权。
@@ -38,7 +40,7 @@
 - [ ] 优先跑sherpa-onnx官方Rust/C API离线样例，核对框架及每权重许可；若质量不通过，再评估pyannote独立进程的首次下载/运行/打包。
 - [ ] 记录原硬件，明确定义不含overlap的DER为主门槛、250ms collar，另列含overlap的DER；目标DER≤20%、RTF≤0.5、RSS≤2GiB、取消≤3秒。不能只在排除噪声的小样本上报成功。
 - [ ] 同时验证Whisper打开段/词timestamp的中文漏字回归、Parakeet是否能产真时间；forced alignment单独计时和资源。
-- [ ] 形成Go/No-Go：模型、时间、许可、打包任一未通过则暂停D3–D5并修订估算；P1–P3可继续。固定模型hash、参数和算法版本后才正式依赖。
+- [ ] 形成Go/No-Go：模型、时间、许可、打包任一未通过则暂停D3–D5并修订估算；P3可继续；P4技术门槛失败时先记录No-Go与修订结论，再安排后置P1/P2，不把未通过的分离集成计为完成。固定模型hash、参数和算法版本后才正式依赖。
 - [ ] 审阅提交探针脚本与无隐私汇总 `docs: record diarization feasibility gate`，不提交真会议/模型文件。
 
 ## Task D2：真实时间与公共映射
@@ -73,7 +75,7 @@
 
 - [ ] 写 `diarization::tests::manual_override_survives_same_transcript_rerun`：同revision重跑默认保留override；高交集匹配speaker才继承姓名，歧义新UUID。
 - [ ] 写 `diarization::tests::retranscription_does_not_mix_old_overrides`：重转写备份旧内容、替换segment后旧覆盖不作用；失败回退旧可读结果。
-- [ ] 写 `diarization::tests::rename_merge_resolve_consistently_and_stale_summary`：相同姓名不自动合并；无跨会/环；快照/导出/API同名；summary_stale=true，无自动付费请求。
+- [ ] 写 `diarization::tests::rename_merge_resolve_consistently_and_stale_summary`：相同姓名不自动合并；无跨会/环；快照/API同名；导出一致性测试移至P2 E3；summary_stale=true，无自动付费请求。
 - [ ] 先Rust tests失败，再实现effective speaker解析；Bun `speakers.test.tsx`测试试听5–10秒、改名失败保留输入、重跑清空覆盖需要确认。
 - [ ] UI展示unknown/overlap而不是伪造speaker，期望人数1–10，取消后可以继续操作，姓名只在会议内生效；提交 `feat: add speaker correction and safe reruns`。
 
@@ -85,7 +87,7 @@
 
 - [ ] 用留出样本重复D1质量/性能门槛；实际120分钟录音测内存曲线、队列积压与时间映射，验证重任务不挤占录音。
 - [ ] 包内离线执行模型，关网/关应用/模型损坏/磁盘满/取消/开新录音分别验证旧内容仍可读；缺音频给操作原因。
-- [ ] 全链路：录后分离→试听→命名→合并/覆盖→重新摘要→DOCX/PDF→MCP查询，核对所有姓名和source revision；导入/重转写也各跑一次。
+- [ ] 全链路：录后分离→试听→命名→合并/覆盖→重新摘要→MCP查询，核对所有姓名和source revision；导入/重转写也各跑一次。DOCX/PDF与MCP导出的一致性验收后置到P2 E3，不阻塞P4阶段完成。
 - [ ] 运行P0统一测试入口、model回归和Tauri构建；使用代表听音验收，记录可接受的unknown比例与误归属样例。
 - [ ] 审阅提交验收报告 `test: validate internal speaker workflow end to end`，发布安装包另按用户授权执行。
 

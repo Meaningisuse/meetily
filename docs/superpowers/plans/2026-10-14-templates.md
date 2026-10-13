@@ -10,6 +10,8 @@
 
 **Spec:** [内部增强版落地设计](../specs/2026-10-14-internal-enhancement-design.md)。必须同时阅读；本文都是未来实施任务，本次未执行。
 
+**执行优先级：** P0 → P3 → P4 → P1 → P2；P1/P2最后实施，编号仅作工作包标识。
+
 ## Global Constraints
 
 - 内部自用，覆盖 Pro 核心能力，不做收费授权。
@@ -30,7 +32,7 @@
 
 ## Task T1：模板服务与内容版本
 
-**Files:** 新增 `summary/templates/{service,storage}.rs`；修改 `summary/templates/{types,loader,mod}.rs`、`summary/template_commands.rs`；新增 `20261014000300_add_template_preferences.sql`、`database/repositories/template_preference.rs`。
+**Files:** 新增 `summary/templates/{service,storage}.rs`；修改 `summary/templates/{types,loader,mod}.rs`、`summary/template_commands.rs`；新增 `20261014000600_add_template_preferences.sql`、`database/repositories/template_preference.rs`。
 
 **Interfaces:** `TemplateRecord` 按设计；`TemplateService::{list,get,create,update,duplicate,delete,import_json,export_json}`。`update(id: &str, content: Template, expected_revision: &str) -> Result<TemplateRecord, EnhancementError>`；`delete(id, expected_revision, replacement_id)`；`import_json(raw: &[u8])` 总是产生新custom UUID。
 

@@ -9,10 +9,10 @@
 | 工作包 | 交付 | 现有可复用部分 | 核心缺口 |
 |---|---|---|---|
 | P0 基础 | 构建基线、共享文档、任务、可靠性 | repositories、录音恢复、摘要来源指纹 | 忽略的 Cargo 配置、事务版本、共享快照、队列和恢复约束 |
-| P1 模板 | 六内置模板、完整 CRUD、复制、交换 | JSON schema、loader、提示词生成 | 只有列表和章节预览，无编辑器和写入服务 |
-| P2 导出 | 摘要 MD/DOCX/PDF；转写 TXT/DOCX | 复制逻辑、BlockNote、旧格式兼容读取 | 共享文档结构、格式渲染、保存和失败处理 |
 | P3 自动化 | 本地只读 API/CLI/MCP；后续写入、录音、Webhook | 当前 Tauri commands、摘要和录音逻辑 | 真正 gateway、权限、共享服务、任务、持久事件 |
 | P4 说话人 | 录后/导入/重新转写的批处理分离，试听、改名、合并、纠错 | 保存音频、导入、重新转写、播放时间 | 模型、真实 STT 时间、声纹聚类、版本化结果和人工覆盖 |
+| P1 模板 | 六内置模板、完整 CRUD、复制、交换 | JSON schema、loader、提示词生成 | 只有列表和章节预览，无编辑器和写入服务 |
+| P2 导出 | 摘要 MD/DOCX/PDF；转写 TXT/DOCX | 复制逻辑、BlockNote、旧格式兼容读取 | 共享文档结构、格式渲染、保存和失败处理 |
 
 官方对比页提供能力分类；录音说话人处理按操作文档的“停止后处理”设计。本文不承诺稳定实时 speaker labels、跨会议身份识别、Pro API 协议完全兼容、企业权限或商业支持。参考：[Pro 对比](https://meetily.ai/pro#pro-comparison)、[分离操作说明](https://docs.meetily.ai/features/speaker-diarization)。
 
@@ -20,18 +20,22 @@
 
 ## 2. 执行入口、依赖与排期
 
-| 独立实施计划 | 依赖 | 人日粗估 | 阶段验收 |
+| 独立实施计划 | 依赖 | 原工作包人日粗估 | 阶段验收 |
 |---|---|---:|---|
 | [P0 基础](../plans/2026-10-14-foundation.md) | 当前归档清理 | 3–5 | 干净安装和核心回归；文档、事务、任务合同固定 |
-| [P1 模板](../plans/2026-10-14-templates.md) | P0 内容版本 | 3–5 | 编辑/交换/重启持久化；旧模板兼容 |
-| [P2 导出](../plans/2026-10-14-exports.md) | P0 文档快照 | 6–10 | 中文长文档、格式结构、原子保存 |
-| [P3 自动化](../plans/2026-10-14-automation.md) | P0；导出接口依赖 P2 | 8–12 + 5–8 | 首先只读；再验收写入/录音/事件 |
-| [P4 分离](../plans/2026-10-14-diarization.md) | 探针可先做；集成依赖 P0 | 3–5 + 15–25 | 选型门槛通过，再完成三入口和人工纠正 |
+| [P3 自动化](../plans/2026-10-14-automation.md) | P0；现有模板loader；导出接入后置到P2 | 8–12 + 5–8 | 先只读，再写入/录音/事件；导出不阻塞阶段验收 |
+| [P4 分离](../plans/2026-10-14-diarization.md) | 探针可先做；集成依赖P0，接入P3接口/事件 | 3–5 + 15–25 | 模型门槛、三入口、人工纠正；不等待P1/P2 |
+| [P1 模板](../plans/2026-10-14-templates.md) | P0内容版本；排期在P3/P4后 | 3–5 | 编辑/交换/重启持久化；旧模板兼容 |
+| [P2 导出](../plans/2026-10-14-exports.md) | P0文档快照；最后接入P3/P4成果 | 6–10 | 中文文档、原子保存；补齐HTTP/CLI/MCP导出验收 |
 | 合计 | macOS 首版 | **43–70** | 内部功能覆盖；效果与打包实测验收 |
 
 1 人日按 8 小时。熟悉 Rust/Tauri/React 的开发者单人约 9–14 个全职开发周；这不是已验证排期。Windows 再预留 8–15 人日，Linux 发行另立范围。
 
-建议顺序：P0 → P1/P2 → P3 只读形成“会议→文档→助手”首版，约 20–32 人日；P4 探针尽早执行，后续 P3 写入与 P4 完整集成约 23–38 人日。每包完成后可单独上线内部安装包。人工数据标注、硬件到位和模型首次下载等待时间不计为已完成开发。
+用户调整后的执行顺序：**P0 → P3 → P4 → P1 → P2**。P编号保留为工作包标识，不代表执行优先级。P4的D1模型/时间探针可在P0基线准备后尽早进行，用于提前发现风险；正式产品化仍排在P3之后。P1模板管理和P2文档导出放到最后。
+
+第一阶段先交付“可靠录音/转写 → 助手读取与脚本控制 → 录后说话人分离”；摘要沿用现有模板loader，不等待P1。P3中的导出HTTP路由、CLI export、MCP export_meeting及对应验收移交P2 E3，P3与P4阶段不以DOCX/PDF为验收前置。P4的speaker API与分离完成事件在P4落地时接入已完成的P3。
+
+总量粗估仍为43–70人日；原先20–32/23–38人日的阶段拆分不再适用。导出接入工作随P2验收，阶段人日待P0基线和P4探针校准，不能把全部P3估算直接当作无导出首版用时。每包完成后可单独交付内部安装包。人工数据标注、硬件到位和模型首次下载等待时间不计为已完成开发。
 
 角色：Rust 工程师负责领域服务/SQLite/任务/原生模型，React 工程师负责模板、导出、说话人面板，使用代表负责样本和操作验收；个人开发可兼任，模型质量验收必须有人听音确认。
 
@@ -124,16 +128,16 @@ API 列表不返回全量 `MeetingDocument`。`Page<T> { items: Vec<T>, next_cur
 
 ## 5. 数据迁移合同
 
-下面是**计划新增**迁移，不属于本次清理。已有 10 个迁移不可编辑、重排或删除，即使名称带 license/backup/speaker。SQLx migration checksum 要保持。
+下面是**计划新增**迁移，不属于本次清理。已有 10 个迁移不可编辑、重排或删除，即使名称带 license/backup/speaker。SQLx migration checksum 要保持。尚未实现的模板偏好迁移编号改为20261014000600，排在自动化和分离迁移之后，避免最后实现P1时向已升级版本中补插更早迁移；这不改任何已发布迁移。
 
 | 新迁移建议名 | 表与关键列 | 行为 |
 |---|---|---|
 | `20261014000100_add_content_versions.sql` | `meeting_content_versions(meeting_id PK/FK, revision, transcript_revision, speaker_revision, summary_revision, notes_revision)`；各版本 INTEGER NOT NULL DEFAULT 0；`meeting_document_content(meeting_id PK/FK, summary_markdown, notes_markdown)` | 插入存量 meeting；新 meeting 同事务初始化；正文/命名变更同事务更新，增量只在服务入口做；canonical内容不覆盖原编辑器JSON，首次保存才回写 |
 | `20261014000200_add_enhancement_jobs.sql` | `enhancement_jobs(id PK, meeting_id FK, kind, status, source_revision, params_json, progress, error_code, created_at, updated_at)` | meeting 删除 cascade；status 限定 queued/running/succeeded/failed/cancelled/interrupted |
-| `20261014000300_add_template_preferences.sql` | `meeting_template_preferences(meeting_id PK/FK, template_id, template_hash)` | 未选择时用当前默认模板；不回写历史摘要 |
 | `20261014000400_add_automation.sql` | `automation_clients(id PK,name,token_hash,scopes_json,expires_at,revoked_at)`；`automation_webhooks(id PK,url,secret_ref,enabled)`；`automation_events(id PK,meeting_id,kind,revision,payload_json,created_at)`；`automation_deliveries(event_id,webhook_id,attempts,next_attempt_at,status,last_http_status, PK(event_id,webhook_id))` | token 只存 hash，Webhook secret 只存系统密钥库引用；每个事件每订阅独立投递；事件不 cascade，以支持删除通知/审计，但无全文正文 |
 | `20261014000450_add_transcript_timing.sql` | `transcripts.timing_precision TEXT NOT NULL DEFAULT 'approximate'`，允许 exact/approximate/unavailable | D2增加；旧有时间按approximate，无时间读为unavailable，不伪造精确性 |
 | `20261014000500_add_diarization.sql` | 见下面六表 | 分离结果和人工修正分开；活动结果由 meeting 状态指向 |
+| `20261014000600_add_template_preferences.sql` | `meeting_template_preferences(meeting_id PK/FK, template_id, template_hash)` | 未选择时用当前默认模板；不回写历史摘要 |
 
 分离六表：
 
@@ -180,18 +184,20 @@ renderer 共用 document blocks（标题、段落、列表、表格、代码、�
 
 每个客户端通过桌面创建 256-bit 随机 Bearer token，只展示一次；服务端存 SHA256，恒定时间比较；到期/撤销每次查询检查。scopes 首版 `read`；后续 `write`、`record` 独立授权。read 不包含原始音频下载或密钥。首版read授权覆盖当前用户的全部会议，界面必须显示该授权范围，不做单会议ACL。授权不是收费 License。
 
+P3首版不注册导出路由/CLI命令/MCP工具，`/health.capabilities`中不包含export；客户端只展示实际已实现且授权可用的工具，不将不存在的导出包装成成功。P1前summary-jobs直接读取现有模板loader并冻结内容，不依赖模板管理CRUD/偏好表。
+
 首版 gateway 建议 axum；锁定版本由 P0 Cargo/toolchain 探针产出。协议 namespace `/api/internal/v1`，不仿冒 `meetily-pro` CLI：
 
 | HTTP | scope | 请求与响应 |
 |---|---|---|
-| `GET /health` | 无；仅 loopback | protocol_version/instance_id，仅服务状态 |
+| `GET /health` | 无；仅 loopback | protocol_version/instance_id/capabilities，仅服务状态及已实现功能名 |
 | `GET /meetings?limit=&cursor=` | read | Page<MeetingBrief>：id/title/created_at/revision |
 | `GET /search?q=&limit=&cursor=` | read | Page<SearchHit>：meeting_id/segment_id/start_ms/snippet；q 1–256 字符，snippet≤300 字符 |
 | `GET /meetings/:id/transcript` | read | Page<DocumentSegment> + revision |
 | `GET /meetings/:id/summary` | read | markdown/source_revision/stale |
-| `POST /exports` | read | ExportRequest → 202 {job_id} |
+| `POST /exports` | read | P2 E3后开放：ExportRequest → 202 {job_id} |
 | `GET /jobs/:id` | read | JobSnapshot；read可看会议处理状态，export artifact下载另校验创建客户端 |
-| `GET /exports/:artifact_id/download` | read | attachment stream；只允许本客户端 artifact |
+| `GET /exports/:artifact_id/download` | read | P2 E3后开放：attachment stream；只允许本客户端 artifact |
 | `POST /meetings/:id/summary-jobs` | write | template_id/expected_revision → 202 {job_id}；允许调用已配置 provider，不返回 key |
 | `POST /jobs/:id/cancel` | write | 幂等取消；录音任务另须 record |
 | `PATCH /meetings/:id/speakers/:speaker_id` | write | display_name/expected_revision → 新 revision；P4 完成后开放 |
@@ -200,9 +206,9 @@ renderer 共用 document blocks（标题、段落、列表、表格、代码、�
 
 响应错误 `{error:{code,message},request_id}`；401/403/404/409/422/429/503 与状态对应。max body 1 MiB；每 token 60请求/分钟；CPU/GPU重任务（分离/摘要/导出）全局 1 个；等待队列最多 16；分页只读并发 4；Webhook IO投递由独立并发1的dispatcher执行；export cache 总上限 256MiB，单 artifact 64MiB，超额返回 BUSY。Origin 非空且不是允许的本地 desktop origin 时拒绝；Host 限精确 loopback+当前端口，避免本地浏览器/DNS rebinding 绕过。
 
-CLI `meetily-internal list|search|transcript|summary|export|job`，后续 `summarize|record start|record stop`；成功 JSON 输出可选 `--json`，错误 stderr，退出码 0成功/2参数/3未连接/4未授权/5业务失败/6取消。token 来自 OS keychain 或显式环境变量，禁止出现在 argv/discovery/log。
+CLI首版 `meetily-internal list|search|transcript|summary|job`，P3写入阶段增加 `summarize|record start|record stop`，P2 E3再增加 `export`；成功 JSON 输出可选 `--json`，错误 stderr，退出码 0成功/2参数/3未连接/4未授权/5业务失败/6取消。token 来自 OS keychain 或显式环境变量，禁止出现在 argv/discovery/log。
 
-MCP stdio tools 同一 DTO：`list_meetings`、`search_meetings`、`get_transcript`、`get_summary`、`export_meeting`、`get_job`。stdout 只写协议，stderr 诊断；工具分页、返回有限内容。外部会议文字是数据，不作为工具执行指令；不提供 shell、任意文件读写、会议删除。首版手动连接一个内部实际使用的助手。
+MCP首版五个只读tools使用同一DTO：`list_meetings`、`search_meetings`、`get_transcript`、`get_summary`、`get_job`；P2 E3后增加 `export_meeting`。stdout 只写协议，stderr 诊断；工具分页、返回有限内容。外部会议文字是数据，不作为工具执行指令；不提供 shell、任意文件读写、会议删除。首版手动连接一个内部实际使用的助手。
 
 ### 写入、录音与事件
 
@@ -246,7 +252,7 @@ Jobs DTO：`JobSnapshot { id,meeting_id,kind,status,progress,error_code,source_r
 
 1. 干净 checkout安装锁定依赖→frontend typecheck/build→Rust单测→Tauri构建→启动包内 llama-helper/FFmpeg（PDF另有sidecar）；CPU路径+macOS Metal分别验证。
 2. 旧库升级，带WAL恢复、磁盘满、只读目录、强制退出后重启；不损坏最后可读会议。
-3. 一份120分钟会议，转写完整计数、导出末行完整、中文字体、峰值RSS和积压恢复；设备断开/切换和取消后继续录音。
+3. P0/P4用一份120分钟会议验证转写完整计数、峰值RSS和积压恢复，设备断开/切换和取消后继续录音；导出末行完整和中文字体检查在P2追加，不阻塞P3/P4。
 4. gateway默认关闭/无效凭据/越scope/撤销/实例退出；MCP实际连接并定位一段会议证据；不泄露key和完整诊断正文。
 5. 分离Go记录、三入口、改名/合并/覆盖、rerun/retranscribe、摘要过期和各出口一致。
 
