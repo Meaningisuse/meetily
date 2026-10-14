@@ -1434,26 +1434,11 @@ mod tests {
             .transcribe_audio_with_verified_timing(audio, Some("zh".into()))
             .await
             .unwrap();
-        if precision == TimingPrecision::Unavailable {
-            assert!(timed_segments.is_empty());
-            eprintln!(
-                "AliMeeting annotated crop: timing=Unavailable, reference={reference_start_ms}..{reference_end_ms}ms"
-            );
-            return;
-        }
-
-        assert!(!timed_segments.is_empty());
-        for segment in timed_segments {
-            eprintln!(
-                "AliMeeting annotated crop: measured={}..{}ms, reference={}..{}ms, errors={}ms/{}ms (gate=±250ms)",
-                segment.start_ms,
-                segment.end_ms,
-                reference_start_ms,
-                reference_end_ms,
-                segment.start_ms - reference_start_ms,
-                segment.end_ms - reference_end_ms,
-            );
-        }
+        assert_ne!(precision, TimingPrecision::Exact);
+        assert!(timed_segments.is_empty());
+        eprintln!(
+            "AliMeeting annotated crop: precision={precision:?}; timestamp candidates stay unexposed until validated against reference={reference_start_ms}..{reference_end_ms}ms"
+        );
     }
 
     fn tiny_model(models: &[ModelInfo]) -> &ModelInfo {

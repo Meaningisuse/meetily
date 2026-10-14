@@ -11,15 +11,18 @@ pub(crate) fn timing_or_unavailable<E>(
     result: std::result::Result<Option<Vec<TimedText>>, E>,
 ) -> (Vec<TimedText>, TimingPrecision) {
     match result {
-        Ok(Some(segments)) if !segments.is_empty() => (segments, TimingPrecision::Exact),
+        // Text agreement and valid ranges prove that the timestamp pass did
+        // not lose transcript content; they do not validate temporal accuracy.
+        // Keep the established chunk bounds as approximate until an aligner
+        // passes the independent annotation gate.
+        Ok(Some(segments)) if !segments.is_empty() => (Vec::new(), TimingPrecision::Approximate),
         Ok(None) | Ok(Some(_)) | Err(_) => (Vec::new(), TimingPrecision::Unavailable),
     }
 }
 
-/// Convert whisper.cpp's centisecond segment offsets to milliseconds only when
-/// all ranges are valid and the timed segment text exactly accounts for the
-/// canonical transcript (ignoring whitespace between CJK segments and final
-/// sentence punctuation differences).
+/// Check whisper.cpp's centisecond segment candidates against the canonical
+/// transcript and audio bounds. This validates transcript coverage, not timing
+/// accuracy, so a successful result must not be labeled `Exact` by itself.
 pub(crate) fn verify_whisper_timed_segments(
     canonical_text: &str,
     segments: &[WhisperSegmentTicks],
@@ -144,7 +147,9 @@ fn is_cjk(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{timing_or_unavailable, verify_whisper_timed_segments, WhisperSegmentTicks};
+    use super::{
+        timing_or_unavailable, verify_whisper_timed_segments, TimedText, WhisperSegmentTicks,
+    };
 
     fn segment(text: &str, start: i64, end: i64) -> WhisperSegmentTicks {
         WhisperSegmentTicks {
@@ -179,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_tail_text_rejects_all_exact_ranges() {
+    fn incomplete_tail_text_rejects_timestamp_candidate() {
         let result = verify_whisper_timed_segments(
             "会议结论和最后行动项",
             &[segment("会议结论和", 0, 80), segment("最后", 80, 110)],
@@ -198,6 +203,21 @@ mod tests {
 
         assert!(timed.is_empty());
         assert_eq!(precision, super::TimingPrecision::Unavailable);
+    }
+
+    #[test]
+    fn text_agreement_does_not_mark_whisper_timestamps_exact_without_alignment_validation() {
+        let (timed, precision) = timing_or_unavailable::<&str>(Ok(Some(vec![TimedText {
+            text: "你好".into(),
+            start_ms: 0,
+            end_ms: 500,
+        }])));
+
+        assert!(
+            timed.is_empty(),
+            "unvalidated token times must not be persisted"
+        );
+        assert_eq!(precision, super::TimingPrecision::Approximate);
     }
 
     #[test]
