@@ -1398,16 +1398,23 @@ mod tests {
         }
     }
 
-    /// Compare Whisper's timestamp estimate with the public AliMeeting Test
-    /// TextGrid span for the supplied 3 s crop. The crop starts 300 ms before
-    /// the annotated utterance and ends 230 ms after it.
+    /// Compare Whisper's timestamp estimate with a public AliMeeting Test
+    /// TextGrid span for a supplied crop. Reference bounds are crop-relative.
     #[tokio::test]
-    #[ignore = "requires WHISPER_TIMING_TEST_MODEL and the public AliMeeting annotated crop"]
-    async fn alimeeting_timestamp_boundaries_report_public_annotation_error() {
+    #[ignore = "requires a model, public AliMeeting crop, and crop-relative TextGrid bounds"]
+    async fn alimeeting_timestamp_probe_reports_annotation_errors() {
         let model_path = std::env::var("WHISPER_TIMING_TEST_MODEL")
             .expect("set WHISPER_TIMING_TEST_MODEL to a multilingual GGML model");
         let audio_path = std::env::var("WHISPER_TIMING_TEST_AUDIO")
             .expect("set WHISPER_TIMING_TEST_AUDIO to the public AliMeeting crop");
+        let reference_start_ms = std::env::var("WHISPER_TIMING_REFERENCE_START_MS")
+            .expect("set reference start in crop-relative milliseconds")
+            .parse::<i64>()
+            .unwrap();
+        let reference_end_ms = std::env::var("WHISPER_TIMING_REFERENCE_END_MS")
+            .expect("set reference end in crop-relative milliseconds")
+            .parse::<i64>()
+            .unwrap();
         let engine = WhisperEngine::new_with_models_dir(None).unwrap();
         let context = WhisperContext::new_with_params(
             &model_path,
@@ -1427,21 +1434,26 @@ mod tests {
             .transcribe_audio_with_verified_timing(audio, Some("zh".into()))
             .await
             .unwrap();
-        assert_eq!(precision, TimingPrecision::Exact, "both decode texts must agree");
-        assert_eq!(timed_segments.len(), 1);
+        if precision == TimingPrecision::Unavailable {
+            assert!(timed_segments.is_empty());
+            eprintln!(
+                "AliMeeting annotated crop: timing=Unavailable, reference={reference_start_ms}..{reference_end_ms}ms"
+            );
+            return;
+        }
 
-        // Source TextGrid: 23.50–25.97 s. Crop starts at 23.20 s, so the
-        // expected crop-relative span is 300–2770 ms. This is a diagnostic,
-        // not a passing timing-accuracy gate; record measured errors to make
-        // the current limitation reproducible without asserting product quality.
-        let segment = &timed_segments[0];
-        eprintln!(
-            "AliMeeting annotated crop: measured={}..{}ms, reference=300..2770ms, errors={}ms/{}ms (gate=±250ms)",
-            segment.start_ms,
-            segment.end_ms,
-            segment.start_ms - 300,
-            segment.end_ms - 2770,
-        );
+        assert!(!timed_segments.is_empty());
+        for segment in timed_segments {
+            eprintln!(
+                "AliMeeting annotated crop: measured={}..{}ms, reference={}..{}ms, errors={}ms/{}ms (gate=±250ms)",
+                segment.start_ms,
+                segment.end_ms,
+                reference_start_ms,
+                reference_end_ms,
+                segment.start_ms - reference_start_ms,
+                segment.end_ms - reference_end_ms,
+            );
+        }
     }
 
     fn tiny_model(models: &[ModelInfo]) -> &ModelInfo {

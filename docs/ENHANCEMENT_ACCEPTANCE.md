@@ -50,4 +50,4 @@ P4 D1已将OpenSLR AliMeeting Test归档生成20个仓库外匿名样本，合�
 
 替代的 ggml/C++ MOSS q8_0 候选也已在 M5 上做隔离评估：Metal 构建完成，CTest 5通过、9跳过；30秒开发裁片 DER 0.51%、overlap DER 0.47%，CPU四线程11.02秒干净退出，输出与Metal逐字节相同，但Metal进程在清理时以134退出。完整34.442分钟录音需分配45,659 MiB，37.73秒后以139退出且无输出。故其长录音和Metal稳定运行门禁失败，不改变D1 NO-GO结论。
 
-D2时间精度补充验收：AliMeeting Test单句标注裁片在双解码文本一致时返回`Exact`，但测得0–2.88秒，人工参考为0.30–2.77秒，边界误差-300/+110毫秒，未达到±250毫秒标准；ASR还漏词并误识一个词。实验性Whisper token对齐仍未达门槛并已撤回。该结果证明当前`Exact`是解码一致性/范围合法标记，不能视为真实时间准确率已验收。详细数据与复现方式见`DIARIZATION_SPIKE_RESULTS.md`。D2及P4尚未完成。
+D2时间精度补充验收：在AliMeeting Test同一会议的10段无重叠标注语句中，`ggml-base`双解码3/10返回`Exact`，7/10安全返回`Unavailable`。3个`Exact`的起点均早300毫秒；结束边界误差为+110、+200、+80毫秒，均未达到±250毫秒精度门槛；首段ASR还漏词并误识一个词。实验性Whisper token对齐仍未达门槛并已撤回。该结果证明当前`Exact`是解码一致性/范围合法标记，不能视为真实时间准确率已验收。详细数据与复现方式见`DIARIZATION_SPIKE_RESULTS.md`。D2及P4尚未完成。
