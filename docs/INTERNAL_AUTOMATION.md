@@ -44,6 +44,10 @@ MEETILY_AUTOMATION_CLIENT_ID='<client-id>' node automation-client/dist/cli.js jo
 
 服务在 stdio 上只输出 MCP JSON-RPC 消息，诊断信息使用 stderr。注册的五个只读工具为 `list_meetings`、`search_meetings`、`get_transcript`、`get_summary`、`get_job`。它们按页返回，不自动扩展分页；主机关闭 Meetily 后会收到明确的本机实例不可用错误。
 
+### 主机兼容性
+
+上面的配置只适用于支持本地 stdio MCP 的桌面主机。按 OpenAI 当前文档，ChatGPT 自定义 MCP app 直接连接远程 MCP server，不支持直接连接本机服务；ChatGPT Desktop 的本地 MCP 运行路径属于桌面插件发布流程，当前仅对获准合作方开放。不要把上述 JSON 直接粘贴到 ChatGPT 配置中；若目标是 ChatGPT，需使用其支持的远程连接/获准桌面插件方式，并单独评估本机回环网关的安全边界。[ChatGPT MCP 开发者模式说明](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt) · [ChatGPT Desktop 本地 MCP 插件说明](https://developers.openai.com/plugins/deploy/desktop-only)
+
 ## Webhook 接收
 
 在 Meetily 的“设置 → Local automation”中添加目标。地址必须为 HTTPS，并输入与URL主机完全匹配的批准项。Meetily 首次解析时校验并固定解析IP；每次投递会重新解析并拒绝未批准的新IP，不使用系统HTTP代理，也不跟随重定向。只有确实需要内网接收器时，才同时录入目标主机和精确IP。
