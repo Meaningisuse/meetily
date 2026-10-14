@@ -1398,6 +1398,52 @@ mod tests {
         }
     }
 
+    /// Compare Whisper's timestamp estimate with the public AliMeeting Test
+    /// TextGrid span for the supplied 3 s crop. The crop starts 300 ms before
+    /// the annotated utterance and ends 230 ms after it.
+    #[tokio::test]
+    #[ignore = "requires WHISPER_TIMING_TEST_MODEL and the public AliMeeting annotated crop"]
+    async fn alimeeting_timestamp_boundaries_report_public_annotation_error() {
+        let model_path = std::env::var("WHISPER_TIMING_TEST_MODEL")
+            .expect("set WHISPER_TIMING_TEST_MODEL to a multilingual GGML model");
+        let audio_path = std::env::var("WHISPER_TIMING_TEST_AUDIO")
+            .expect("set WHISPER_TIMING_TEST_AUDIO to the public AliMeeting crop");
+        let engine = WhisperEngine::new_with_models_dir(None).unwrap();
+        let context = WhisperContext::new_with_params(
+            &model_path,
+            WhisperContextParameters {
+                use_gpu: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        *engine.current_context.write().await = Some(context);
+        *engine.current_model.write().await = Some("public-alimeeting-test".into());
+
+        let audio = crate::audio::decoder::decode_audio_file(std::path::Path::new(&audio_path))
+            .unwrap()
+            .to_whisper_format();
+        let (_, _, _, timed_segments, precision) = engine
+            .transcribe_audio_with_verified_timing(audio, Some("zh".into()))
+            .await
+            .unwrap();
+        assert_eq!(precision, TimingPrecision::Exact, "both decode texts must agree");
+        assert_eq!(timed_segments.len(), 1);
+
+        // Source TextGrid: 23.50–25.97 s. Crop starts at 23.20 s, so the
+        // expected crop-relative span is 300–2770 ms. This is a diagnostic,
+        // not a passing timing-accuracy gate; record measured errors to make
+        // the current limitation reproducible without asserting product quality.
+        let segment = &timed_segments[0];
+        eprintln!(
+            "AliMeeting annotated crop: measured={}..{}ms, reference=300..2770ms, errors={}ms/{}ms (gate=±250ms)",
+            segment.start_ms,
+            segment.end_ms,
+            segment.start_ms - 300,
+            segment.end_ms - 2770,
+        );
+    }
+
     fn tiny_model(models: &[ModelInfo]) -> &ModelInfo {
         models
             .iter()
