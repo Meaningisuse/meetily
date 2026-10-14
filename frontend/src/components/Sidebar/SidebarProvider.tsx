@@ -221,6 +221,9 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
         if (current !== entry || result.start !== processId) {
           return;
         }
+        // Queue time is not provider execution time. Sixteen waiting jobs can
+        // legitimately exceed the previous generation-only timeout.
+        if (result.job?.status === 'queued') pollCount = 0;
         await onUpdate(result);
         if (summaryPollsRef.current.get(meetingId) !== entry) return;
         if (

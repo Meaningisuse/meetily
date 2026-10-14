@@ -1,5 +1,6 @@
 "use client";
 
+import type { JobSnapshot } from '@/types/enhancement';
 import { MeetingSummary, Summary, Transcript } from '@/types';
 import { BlockNoteSummaryView, BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { EmptyStateSummary } from '@/components/EmptyStateSummary';
@@ -23,6 +24,7 @@ import {
 import { hasVisibleSummaryContent } from '@/lib/summary-content';
 
 interface SummaryPanelProps {
+  job?: JobSnapshot | null;
   meeting: {
     id: string;
     title: string;
@@ -57,6 +59,7 @@ interface SummaryPanelProps {
 }
 
 export function SummaryPanel({
+  job,
   meeting,
   meetingTitle,
   isSummaryDirty,
@@ -278,6 +281,17 @@ export function SummaryPanel({
           )}
         </div>
       </div>
+
+      {job && (
+        <div className="px-4 py-2 border-b text-sm text-gray-600" role="status" aria-live="polite">
+          {job.status === 'queued' ? 'Queued — waiting for the current task' :
+            job.status === 'running' ? 'Generating summary' :
+            job.status === 'interrupted' ? 'Interrupted by restart — generate again to retry' :
+            job.status === 'cancelled' ? 'Task cancelled' :
+            job.status === 'failed' ? (job.error_code === 'CONFLICT' ? 'Meeting changed — current edits preserved; generate again' : 'Task failed — generate again to retry') : 'Task completed'}
+          {job.status === 'running' && job.progress > 0 && <span> · {Math.round(job.progress * 100)}%</span>}
+        </div>
+      )}
 
       {isSummaryLoading ? (
         <div className="flex items-center justify-center flex-1">

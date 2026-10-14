@@ -1,3 +1,4 @@
+import type { JobSnapshot } from '@/types/enhancement';
 import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   CancelSummaryResponse,
@@ -96,6 +97,7 @@ export function useSummaryGeneration({
   onOpenModelSettings,
 }: UseSummaryGenerationProps) {
   const restored = initialSummary?.meeting_id === meeting.id ? initialSummary : null;
+  const [job, setJob] = useState<JobSnapshot | null>(() => restored?.job ?? null);
   const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>(() => restoredSummaryStatus(restored));
   const [summaryError, setSummaryError] = useState<string | null>(() =>
     restoredSummaryStatus(restored) === 'error'
@@ -177,6 +179,7 @@ export function useSummaryGeneration({
     if (!mountedRef.current || visibleMeetingIdRef.current !== meeting.id || generationId !== generationIdRef.current) {
       return;
     }
+    setJob(pollingResult.job ?? null);
     if (pollingResult.status === 'cancelled') {
       let existing: SummaryProcessResponse;
       try {
@@ -295,6 +298,7 @@ export function useSummaryGeneration({
 
   useEffect(() => {
     if (!initialSummary || initialSummary.meeting_id !== meeting.id) return;
+    setJob(initialSummary.job ?? null);
     const status = restoredSummaryStatus(initialSummary);
     setSummaryStatus(status);
     setSummaryError(status === 'error'
@@ -383,6 +387,7 @@ export function useSummaryGeneration({
         await invokeTauri('api_cancel_summary', { meetingId: meeting.id, processId }).catch(() => {});
         return;
       }
+      setJob(result.job ?? null);
       activeProcessIdRef.current = processId;
 
       startSummaryPolling(meeting.id, processId, result =>
@@ -561,6 +566,7 @@ export function useSummaryGeneration({
         return;
       }
       if (result.cancelled) {
+        setJob(result.job ?? (job ? { ...job, status: 'cancelled', error_code: 'CANCELLED' } : null));
         generationIdRef.current += 1;
         activeProcessIdRef.current = null;
         stopSummaryPolling(meeting.id, processId);
@@ -587,9 +593,10 @@ export function useSummaryGeneration({
         });
       }
     }
-  }, [finishGeneration, meeting.id, stopSummaryPolling]);
+  }, [finishGeneration, job, meeting.id, stopSummaryPolling]);
 
   return {
+    job,
     summaryStatus,
     summaryError,
     handleGenerateSummary,

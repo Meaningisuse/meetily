@@ -272,3 +272,27 @@ describe('summary state restored when returning to a meeting', () => {
     expect(text()).toContain('Finished summary');
   });
 });
+
+test('restored job metadata follows queued, running and cancelled polls', async () => {
+  const job = { id: 'job-a', meeting_id: 'meeting-a', kind: 'summary' as const, status: 'queued' as const, source_revision: 2, progress: 0, error_code: null, created_at: '2026-10-14T00:00:00Z', updated_at: '2026-10-14T00:00:00Z' };
+  await show(response({ job }));
+  expect(state.job?.status).toBe('queued');
+  getSummary = async () => response({ job: { ...job, status: 'running', progress: 0.5 } });
+  await tick();
+  expect(state.job?.status).toBe('running');
+  expect(state.job?.progress).toBe(0.5);
+  getSummary = async () => response({ status: 'cancelled', job: { ...job, status: 'cancelled', error_code: 'CANCELLED' } });
+  await tick();
+  expect(state.job?.status).toBe('cancelled');
+  expect(state.summaryStatus).toBe('idle');
+});
+
+test('queue waiting does not consume the provider execution timeout', async () => {
+  const job = { id: 'waiting-job', meeting_id: 'meeting-a', kind: 'summary' as const, status: 'queued' as const, source_revision: 0, progress: 0, error_code: null, created_at: '2026-10-14T00:00:00Z', updated_at: '2026-10-14T00:00:00Z' };
+  getSummary = async () => response({ job });
+  await show(response({ job }));
+  for (let i = 0; i < 205; i++) await tick();
+  expect(state.summaryStatus).toBe('processing');
+  expect(state.job?.status).toBe('queued');
+  expect(timers.size).toBe(1);
+});

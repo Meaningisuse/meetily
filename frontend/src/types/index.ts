@@ -1,3 +1,4 @@
+import type { JobSnapshot } from './enhancement';
 export interface Message {
   id: string;
   content: string;
@@ -99,17 +100,20 @@ export type SummaryProcessStatus =
   | 'idle';
 
 export interface ProcessTranscriptResponse {
+  job?: JobSnapshot;
   message: string;
   process_id: string;
 }
 
 export interface CancelSummaryResponse {
+  job?: JobSnapshot;
   cancelled: boolean;
   message: string;
   meeting_id: string;
 }
 
 export interface SummaryProcessResponse {
+  job?: JobSnapshot | null;
   revision?: number | null;
   status: SummaryProcessStatus;
   meetingName: string | null;

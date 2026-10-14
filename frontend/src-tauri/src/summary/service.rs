@@ -1,15 +1,15 @@
 use crate::database::repositories::{
     meeting::MeetingsRepository, setting::SettingsRepository, summary::SummaryProcessesRepository,
 };
-use crate::summary::llm_client::LLMProvider;
+use crate::ollama::metadata::ModelMetadataCache;
 use crate::summary::language_detection::detect_summary_language;
+use crate::summary::llm_client::LLMProvider;
 use crate::summary::metadata::read_detected_summary_language_from_metadata;
 use crate::summary::processor::{
     clean_llm_markdown_detailed, extract_meeting_name_from_markdown, generate_meeting_summary,
     language_name_from_code, require_visible_markdown,
 };
 use crate::summary::templates::{self, Template};
-use crate::ollama::metadata::ModelMetadataCache;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -73,6 +73,8 @@ struct SummaryCacheSource {
     max_tokens: Option<u32>,
     temperature: Option<f32>,
     top_p: Option<f32>,
+    #[serde(default)]
+    source_versions: Option<crate::meeting::SourceVersions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,6 +124,19 @@ fn build_summary_cache_source(
         max_tokens,
         temperature,
         top_p,
+        source_versions: None,
+    }
+}
+
+fn summary_cache_versions(
+    versions: crate::meeting::SourceVersions,
+) -> crate::meeting::SourceVersions {
+    // The English source remains reusable after its own summary/title write.
+    // Only transcript and speaker versions change the generation source.
+    crate::meeting::SourceVersions {
+        transcript_revision: versions.transcript_revision,
+        speaker_revision: versions.speaker_revision,
+        ..Default::default()
     }
 }
 
@@ -209,10 +224,116 @@ fn extract_cached_english_markdown(
     }
 }
 
+/// Credentials stay in memory; persisted parameters contain source and public
+/// configuration only. A restarted queue requires an explicit resubmission.
+pub struct FrozenSummaryInputs {
+    provider: LLMProvider,
+    api_key: String,
+    ollama_endpoint: Option<String>,
+    custom_openai_endpoint: Option<String>,
+    custom_openai_max_tokens: Option<u32>,
+    custom_openai_temperature: Option<f32>,
+    custom_openai_top_p: Option<f32>,
+    template: Template,
+    detected_summary_language: Option<String>,
+    source_versions: crate::meeting::SourceVersions,
+}
+impl FrozenSummaryInputs {
+    pub fn public_parameters(&self) -> serde_json::Value {
+        serde_json::json!({"template":self.template,"detected_language":self.detected_summary_language,"source_versions":self.source_versions,
+            "ollama_endpoint":self.ollama_endpoint,"custom_openai_endpoint":self.custom_openai_endpoint,
+            "max_tokens":self.custom_openai_max_tokens,"temperature":self.custom_openai_temperature,"top_p":self.custom_openai_top_p})
+    }
+}
+
 /// Summary service - handles all summary generation logic
 pub struct SummaryService;
 
 impl SummaryService {
+    pub async fn freeze_inputs(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        text: &str,
+        model_provider: &str,
+        template_id: &str,
+        source_versions: crate::meeting::SourceVersions,
+    ) -> Result<FrozenSummaryInputs, String> {
+        if template_id.is_empty()
+            || template_id.len() > 64
+            || !template_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err("INVALID_ARGUMENT: invalid template_id".into());
+        }
+        let provider = LLMProvider::from_str(model_provider)?;
+        let mut api_key = if matches!(
+            provider,
+            LLMProvider::Ollama | LLMProvider::BuiltInAI | LLMProvider::CustomOpenAI
+        ) {
+            String::new()
+        } else {
+            SettingsRepository::get_api_key(pool, model_provider)
+                .await
+                .map_err(|e| e.to_string())?
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| format!("API key not found for {model_provider}"))?
+        };
+        let ollama_endpoint = if provider == LLMProvider::Ollama {
+            SettingsRepository::get_model_config(pool)
+                .await
+                .map_err(|e| e.to_string())?
+                .and_then(|c| c.ollama_endpoint)
+        } else {
+            None
+        };
+        let mut endpoint = None;
+        let mut max_tokens = None;
+        let mut temperature = None;
+        let mut top_p = None;
+        if provider == LLMProvider::CustomOpenAI {
+            let config = SettingsRepository::get_custom_openai_config(pool)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("Custom OpenAI configuration is required")?;
+            endpoint = Some(config.endpoint);
+            api_key = config.api_key.unwrap_or_default();
+            max_tokens = config.max_tokens.map(|n| n as u32);
+            temperature = config.temperature;
+            top_p = config.top_p;
+        }
+        let template = templates::get_template(template_id)?;
+        let detected_summary_language = Self::read_detected_summary_language(pool, meeting_id)
+            .await
+            .or_else(|| Self::detect_summary_language_from_text(text));
+        Ok(FrozenSummaryInputs {
+            provider,
+            api_key,
+            ollama_endpoint,
+            custom_openai_endpoint: endpoint,
+            custom_openai_max_tokens: max_tokens,
+            custom_openai_temperature: temperature,
+            custom_openai_top_p: top_p,
+            template,
+            detected_summary_language,
+            source_versions,
+        })
+    }
+    pub(crate) fn register_job_cancellation(
+        meeting_id: &str,
+        started_at: DateTime<Utc>,
+        token: CancellationToken,
+    ) {
+        let mut registry = CANCELLATION_REGISTRY
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(previous) = registry.insert(
+            meeting_id.to_owned(),
+            RegisteredCancellation { started_at, token },
+        ) {
+            previous.token.cancel();
+        }
+    }
     /// Registers a new cancellation token for a meeting.
     pub(crate) fn register_cancellation_token(
         meeting_id: &str,
@@ -240,19 +361,24 @@ impl SummaryService {
         let registry = CANCELLATION_REGISTRY
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(entry) = registry.get(meeting_id).filter(|entry| entry.started_at == started_at)
+        if let Some(entry) = registry
+            .get(meeting_id)
+            .filter(|entry| entry.started_at == started_at)
         {
             info!("Cancelling summary generation for meeting: {}", meeting_id);
             entry.token.cancel();
             true
         } else {
-            warn!("No active summary generation found for meeting: {}", meeting_id);
+            warn!(
+                "No active summary generation found for meeting: {}",
+                meeting_id
+            );
             false
         }
     }
 
     /// Cleans up only the matching generation token after processing completes.
-    fn cleanup_cancellation_token(meeting_id: &str, started_at: DateTime<Utc>) {
+    pub(crate) fn cleanup_cancellation_token(meeting_id: &str, started_at: DateTime<Utc>) {
         let mut registry = CANCELLATION_REGISTRY
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -265,14 +391,14 @@ impl SummaryService {
         }
     }
 
-    async fn read_detected_summary_language(
-        pool: &SqlitePool,
-        meeting_id: &str,
-    ) -> Option<String> {
+    async fn read_detected_summary_language(pool: &SqlitePool, meeting_id: &str) -> Option<String> {
         let meeting = match MeetingsRepository::get_meeting_metadata(pool, meeting_id).await {
             Ok(Some(meeting)) => meeting,
             Ok(None) => {
-                warn!("Meeting not found while reading detected summary language: {}", meeting_id);
+                warn!(
+                    "Meeting not found while reading detected summary language: {}",
+                    meeting_id
+                );
                 return None;
             }
             Err(e) => {
@@ -305,7 +431,10 @@ impl SummaryService {
         let detection = detect_summary_language(&transcript_texts);
         match &detection.language {
             Some(language) => {
-                info!("Detected transcript summary language for normalization: {}", language);
+                info!(
+                    "Detected transcript summary language for normalization: {}",
+                    language
+                );
             }
             None => {
                 info!(
@@ -343,6 +472,7 @@ impl SummaryService {
         custom_prompt: String,
         template_id: String,
         summary_language: Option<String>,
+        frozen: FrozenSummaryInputs,
     ) {
         let start_time = Instant::now();
         info!(
@@ -350,88 +480,30 @@ impl SummaryService {
             meeting_id
         );
 
-        // Parse provider
-        let provider = match LLMProvider::from_str(&model_provider) {
-            Ok(p) => p,
-            Err(e) => {
-                Self::fail_and_cleanup(&pool, &meeting_id, started_at, &e).await;
-                return;
-            }
-        };
-
-        // Validate and setup api_key, Flexible for Ollama, BuiltInAI, and CustomOpenAI
-        let api_key = if provider == LLMProvider::Ollama || provider == LLMProvider::BuiltInAI || provider == LLMProvider::CustomOpenAI {
-            // These providers don't require API keys from the standard database column
-            String::new()
-        } else {
-            match SettingsRepository::get_api_key(&pool, &model_provider).await {
-                Ok(Some(key)) if !key.is_empty() => key,
-                Ok(None) | Ok(Some(_)) => {
-                    let err_msg = format!("API key not found for {}", &model_provider);
-                    Self::fail_and_cleanup(&pool, &meeting_id, started_at, &err_msg).await;
-                    return;
-                }
-                Err(e) => {
-                    let err_msg = format!("Failed to retrieve API key for {}: {}", &model_provider, e);
-                    Self::fail_and_cleanup(&pool, &meeting_id, started_at, &err_msg).await;
-                    return;
-                }
-            }
-        };
-
-        // Get Ollama endpoint if provider is Ollama
-        let ollama_endpoint = if provider == LLMProvider::Ollama {
-            match SettingsRepository::get_model_config(&pool).await {
-                Ok(Some(config)) => config.ollama_endpoint,
-                Ok(None) => None,
-                Err(e) => {
-                    info!("Failed to retrieve Ollama endpoint: {}, using default", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Get CustomOpenAI config if provider is CustomOpenAI
-        let (custom_openai_endpoint, custom_openai_api_key, custom_openai_max_tokens, custom_openai_temperature, custom_openai_top_p) =
-            if provider == LLMProvider::CustomOpenAI {
-                match SettingsRepository::get_custom_openai_config(&pool).await {
-                    Ok(Some(config)) => {
-                        info!("✓ Using custom OpenAI endpoint: {}", config.endpoint);
-                        (
-                            Some(config.endpoint),
-                            config.api_key,
-                            config.max_tokens.map(|t| t as u32),
-                            config.temperature,
-                            config.top_p,
-                        )
-                    }
-                    Ok(None) => {
-                        let err_msg = "Custom OpenAI provider selected but no configuration found";
-                        Self::fail_and_cleanup(&pool, &meeting_id, started_at, err_msg).await;
-                        return;
-                    }
-                    Err(e) => {
-                        let err_msg = format!("Failed to retrieve custom OpenAI config: {}", e);
-                        Self::fail_and_cleanup(&pool, &meeting_id, started_at, &err_msg).await;
-                        return;
-                    }
-                }
-            } else {
-                (None, None, None, None, None)
-            };
-
-        // For CustomOpenAI, use its API key (if any) instead of the empty string
-        let final_api_key = if provider == LLMProvider::CustomOpenAI {
-            custom_openai_api_key.unwrap_or_default()
-        } else {
-            api_key
-        };
+        let FrozenSummaryInputs {
+            provider,
+            api_key: final_api_key,
+            ollama_endpoint,
+            custom_openai_endpoint,
+            custom_openai_max_tokens,
+            custom_openai_temperature,
+            custom_openai_top_p,
+            template,
+            detected_summary_language,
+            source_versions,
+        } = frozen;
 
         // Dynamically fetch context size based on provider and model
         let token_threshold = if provider == LLMProvider::Ollama {
-            match METADATA_CACHE.get_or_fetch(&model_name, ollama_endpoint.as_deref()).await {
+            let metadata = tokio::select! {
+                value=METADATA_CACHE.get_or_fetch(&model_name, ollama_endpoint.as_deref())=>value,
+                _=cancellation_token.cancelled()=> {
+                    let _=SummaryProcessesRepository::update_process_cancelled(&pool,&meeting_id,started_at).await;
+                    Self::cleanup_cancellation_token(&meeting_id,started_at);
+                    return;
+                }
+            };
+            match metadata {
                 Ok(metadata) => {
                     // Reserve 300 tokens for prompt overhead
                     let optimal = metadata.context_size.saturating_sub(300);
@@ -446,7 +518,7 @@ impl SummaryService {
                         "Failed to fetch context for {}: {}. Using default 4000",
                         model_name, e
                     );
-                    4000  // Fallback to safe default
+                    4000 // Fallback to safe default
                 }
             }
         } else if provider == LLMProvider::BuiltInAI {
@@ -467,12 +539,12 @@ impl SummaryService {
                 }
                 Err(e) => {
                     warn!("{}, using default 2048", e);
-                    1748  // 2048 - 300 for overhead
+                    1748 // 2048 - 300 for overhead
                 }
             }
         } else {
             // Cloud providers (OpenAI, Claude, Groq, CustomOpenAI) handle large contexts automatically
-            100000  // Effectively unlimited for single-pass processing
+            100000 // Effectively unlimited for single-pass processing
         };
 
         // Get app data directory for BuiltInAI provider
@@ -482,26 +554,9 @@ impl SummaryService {
             info!("📝 Summary language preference: {}", code);
         }
 
-        let detected_summary_language =
-            Self::read_detected_summary_language(&pool, &meeting_id)
-                .await
-                .or_else(|| Self::detect_summary_language_from_text(&text));
-
-        if let Some(code) = &detected_summary_language {
-            info!("📝 Detected transcript summary language: {}", code);
-        }
-
-        let template = match templates::get_template(&template_id) {
-            Ok(template) => template,
-            Err(e) => {
-                let err_msg = format!("Failed to load template '{}': {}", template_id, e);
-                Self::fail_and_cleanup(&pool, &meeting_id, started_at, &err_msg).await;
-                return;
-            }
-        };
         let template_fingerprint = template_cache_fingerprint(&template);
 
-        let cache_source = build_summary_cache_source(
+        let mut cache_source = build_summary_cache_source(
             &text,
             &custom_prompt,
             &template_id,
@@ -515,6 +570,8 @@ impl SummaryService {
             custom_openai_temperature,
             custom_openai_top_p,
         );
+
+        cache_source.source_versions = Some(summary_cache_versions(source_versions));
 
         let cached_english = match SummaryProcessesRepository::get_summary_data(&pool, &meeting_id).await {
             Err(e) => {
@@ -575,7 +632,7 @@ impl SummaryService {
                     "✓ Successfully processed {} chunks for meeting_id: {}. Duration: {:.2}s",
                     generated.successful_chunk_count, meeting_id, duration
                 );
-                let result_json = match build_summary_result_json(
+                let mut result_json = match build_summary_result_json(
                     &generated.final_markdown,
                     &generated.english_markdown,
                     cache_source,
@@ -591,6 +648,10 @@ impl SummaryService {
                     }
                 };
 
+                if let Some(name) = extract_meeting_name_from_markdown(&generated.final_markdown) {
+                    result_json["generated_title"] = serde_json::Value::String(name);
+                }
+
                 match SummaryProcessesRepository::update_process_completed(
                     &pool,
                     &meeting_id,
@@ -602,20 +663,12 @@ impl SummaryService {
                 .await
                 {
                     Ok(true) => {
-                        if let Some(name) =
-                            extract_meeting_name_from_markdown(&generated.final_markdown)
-                                .filter(|name| !name.is_empty())
-                        {
-                            if let Err(error) =
-                                MeetingsRepository::update_meeting_name(&pool, &meeting_id, &name)
-                                    .await
-                            {
-                                error!("Failed to update meeting name for {}: {}", meeting_id, error);
-                            }
-                        }
                         info!("Summary saved successfully for meeting_id: {}", meeting_id);
                     }
-                    Ok(false) => warn!("Skipped stale summary completion for meeting_id: {}", meeting_id),
+                    Ok(false) => warn!(
+                        "Skipped stale summary completion for meeting_id: {}",
+                        meeting_id
+                    ),
                     Err(error) => error!(
                         "Failed to save completed process for {}: {}",
                         meeting_id, error
@@ -630,8 +683,14 @@ impl SummaryService {
                 )
                 .await
                 {
-                    Ok(false) => warn!("Skipped stale summary cancellation for meeting_id: {}", meeting_id),
-                    Ok(true) => info!("Summary generation was cancelled for meeting_id: {}", meeting_id),
+                    Ok(false) => warn!(
+                        "Skipped stale summary cancellation for meeting_id: {}",
+                        meeting_id
+                    ),
+                    Ok(true) => info!(
+                        "Summary generation was cancelled for meeting_id: {}",
+                        meeting_id
+                    ),
                     Err(db_error) => error!(
                         "Failed to update DB status to cancelled for {}: {}",
                         meeting_id, db_error
@@ -667,14 +726,14 @@ impl SummaryService {
             meeting_id, error_msg
         );
         match SummaryProcessesRepository::update_process_failed(
-            pool,
-            meeting_id,
-            started_at,
-            error_msg,
+            pool, meeting_id, started_at, error_msg,
         )
         .await
         {
-            Ok(false) => warn!("Skipped stale summary failure for meeting_id: {}", meeting_id),
+            Ok(false) => warn!(
+                "Skipped stale summary failure for meeting_id: {}",
+                meeting_id
+            ),
             Ok(true) => {}
             Err(e) => error!(
                 "Failed to update DB status to failed for {}: {}",
@@ -682,13 +741,83 @@ impl SummaryService {
             ),
         }
     }
-
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_source_versions_ignore_generated_summary_and_title_but_include_speakers() {
+        let before = crate::meeting::SourceVersions {
+            revision: 5,
+            transcript_revision: 2,
+            speaker_revision: 1,
+            summary_revision: 1,
+            notes_revision: 1,
+        };
+        let mut after = before.clone();
+        after.revision = 7;
+        after.summary_revision = 2;
+        assert_eq!(
+            summary_cache_versions(before.clone()),
+            summary_cache_versions(after.clone())
+        );
+        after.speaker_revision += 1;
+        assert_ne!(
+            summary_cache_versions(before),
+            summary_cache_versions(after)
+        );
+    }
+
+    #[tokio::test]
+    async fn frozen_provider_parameters_do_not_follow_later_setting_changes() {
+        let pool = crate::meeting::tests::pool().await;
+        crate::meeting::tests::seed(&pool, "freeze").await;
+        SettingsRepository::save_model_config(
+            &pool,
+            "ollama",
+            "before",
+            "base",
+            Some("http://127.0.0.1:11434"),
+        )
+        .await
+        .unwrap();
+        let frozen = SummaryService::freeze_inputs(
+            &pool,
+            "freeze",
+            "Meeting transcript",
+            "ollama",
+            "daily_standup",
+            crate::meeting::SourceVersions::default(),
+        )
+        .await
+        .unwrap();
+        SettingsRepository::save_model_config(
+            &pool,
+            "ollama",
+            "after",
+            "base",
+            Some("http://127.0.0.1:11435"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            frozen.ollama_endpoint.as_deref(),
+            Some("http://127.0.0.1:11434")
+        );
+        assert!(frozen.public_parameters().get("api_key").is_none());
+        assert!(SummaryService::freeze_inputs(
+            &pool,
+            "freeze",
+            "Text",
+            "ollama",
+            "../../secret",
+            crate::meeting::SourceVersions::default()
+        )
+        .await
+        .is_err());
+    }
 
     #[test]
     fn stale_cleanup_keeps_the_replacement_cancellation_token() {
@@ -700,7 +829,10 @@ mod tests {
 
         assert!(first.is_cancelled());
         SummaryService::cleanup_cancellation_token(&meeting_id, first_started_at);
-        assert!(SummaryService::cancel_summary(&meeting_id, second_started_at));
+        assert!(SummaryService::cancel_summary(
+            &meeting_id,
+            second_started_at
+        ));
         assert!(second.is_cancelled());
         SummaryService::cleanup_cancellation_token(&meeting_id, second_started_at);
     }
@@ -749,12 +881,18 @@ mod tests {
 
     #[test]
     fn test_strip_title_if_present_preserves_already_stripped() {
-        assert_eq!(strip_title_if_present("## Action Items\nfoo"), "## Action Items\nfoo");
+        assert_eq!(
+            strip_title_if_present("## Action Items\nfoo"),
+            "## Action Items\nfoo"
+        );
     }
 
     #[test]
     fn test_strip_title_if_present_strips_leading_h1() {
-        assert_eq!(strip_title_if_present("# Meeting Title\n## Action Items\nfoo"), "## Action Items\nfoo");
+        assert_eq!(
+            strip_title_if_present("# Meeting Title\n## Action Items\nfoo"),
+            "## Action Items\nfoo"
+        );
     }
 
     #[test]

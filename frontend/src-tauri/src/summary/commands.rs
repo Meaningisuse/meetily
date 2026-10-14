@@ -1,25 +1,21 @@
-use crate::summary::content::summary_is_renderable;
 use crate::database::repositories::{
-    meeting::MeetingsRepository,
-    summary::SummaryProcessesRepository, transcript_chunk::TranscriptChunksRepository,
+    meeting::MeetingsRepository, summary::SummaryProcessesRepository,
 };
 use crate::state::AppState;
+use crate::summary::content::summary_is_renderable;
+use crate::summary::language_detection::{detect_summary_language, SummaryLanguageDetection};
 use crate::summary::metadata::{
     read_detected_summary_language_from_metadata, read_summary_language_from_metadata,
     write_detected_summary_language_to_metadata, write_summary_language_to_metadata,
 };
-use crate::summary::language_detection::{
-    detect_summary_language, SummaryLanguageDetection,
-};
 use crate::summary::processor::{clean_llm_markdown_detailed, contains_reasoning_marker};
 use crate::summary::service::SummaryService;
-use log::{error as log_error, info as log_info, warn as log_warn};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use log::{error as log_error, info as log_info, warn as log_warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use tauri::{AppHandle, Runtime};
-
 
 static SUMMARY_START_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -39,6 +35,7 @@ fn next_summary_start(now: DateTime<Utc>) -> DateTime<Utc> {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SummaryResponse {
     pub revision: Option<i64>,
+    pub job: Option<crate::jobs::JobSnapshot>,
     pub status: String,
     #[serde(rename = "meetingName")]
     pub meeting_name: Option<String>,
@@ -53,6 +50,7 @@ pub struct SummaryResponse {
 pub struct ProcessTranscriptResponse {
     pub message: String,
     pub process_id: String,
+    pub job: crate::jobs::JobSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,14 +105,21 @@ pub async fn api_save_meeting_summary<R: Runtime>(
         meeting_id
     );
     if !summary_is_renderable(&summary) {
-        return Err("Summary contains no visible content or model reasoning markers and was not saved.".into());
+        return Err(
+            "Summary contains no visible content or model reasoning markers and was not saved."
+                .into(),
+        );
     }
     let pool = state.db_manager.pool();
 
-
     if let Some(expected) = expected_revision {
-        let versions=crate::meeting::MeetingWriteService::new(pool.clone()).save_summary_value(&meeting_id,&summary,expected).await.map_err(|error|error.to_string())?;
-        return Ok(serde_json::json!({"message":"Meeting summary saved successfully","revision":versions.revision}));
+        let versions = crate::meeting::MeetingWriteService::new(pool.clone())
+            .save_summary_value(&meeting_id, &summary, expected)
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(
+            serde_json::json!({"message":"Meeting summary saved successfully","revision":versions.revision}),
+        );
     }
 
     match SummaryProcessesRepository::update_meeting_summary(pool, &meeting_id, &summary).await {
@@ -197,9 +202,11 @@ pub async fn api_get_meeting_detected_summary_language<R: Runtime>(
     );
 
     match resolve_meeting_folder(state.db_manager.pool(), &meeting_id).await? {
-        MeetingFolderResolution::Folder(folder) => read_detected_summary_language_from_metadata(&folder)
-            .map(MeetingSummaryLanguagePreference::metadata)
-            .map_err(|e| e.to_string()),
+        MeetingFolderResolution::Folder(folder) => {
+            read_detected_summary_language_from_metadata(&folder)
+                .map(MeetingSummaryLanguagePreference::metadata)
+                .map_err(|e| e.to_string())
+        }
         MeetingFolderResolution::NoFolder => Ok(MeetingSummaryLanguagePreference::local_fallback()),
     }
 }
@@ -220,8 +227,11 @@ pub async fn api_save_meeting_detected_summary_language<R: Runtime>(
 
     match resolve_meeting_folder(state.db_manager.pool(), &meeting_id).await? {
         MeetingFolderResolution::Folder(folder) => {
-            write_detected_summary_language_to_metadata(&folder, detected_summary_language.as_deref())
-                .map_err(|e| e.to_string())?;
+            write_detected_summary_language_to_metadata(
+                &folder,
+                detected_summary_language.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
             read_detected_summary_language_from_metadata(&folder)
                 .map(MeetingSummaryLanguagePreference::metadata)
                 .map_err(|e| e.to_string())
@@ -283,7 +293,10 @@ fn redact_flagged_reasoning(mut result: serde_json::Value) -> serde_json::Value 
         reasoning_stripped |= sanitize_markdown_value(cache.get_mut("markdown"));
     }
     if reasoning_stripped {
-        object.insert("reasoning_stripped".to_string(), serde_json::Value::Bool(true));
+        object.insert(
+            "reasoning_stripped".to_string(),
+            serde_json::Value::Bool(true),
+        );
     }
     result
 }
@@ -347,7 +360,14 @@ pub async fn api_get_summary<R: Runtime>(
                 }
             };
 
+            let job = match process.start_time {
+                Some(started) => crate::jobs::repository::attempt(pool, &meeting_id, started)
+                    .await
+                    .map_err(|e| e.to_string())?,
+                None => None,
+            };
             let response = SummaryResponse {
+                job,
                 revision: process.content_revision,
                 status: status.clone(),
                 meeting_name,
@@ -379,6 +399,7 @@ pub async fn api_get_summary<R: Runtime>(
             };
 
             Ok(SummaryResponse {
+                job: None,
                 revision: None,
                 status: "idle".to_string(),
                 meeting_name,
@@ -414,80 +435,137 @@ pub async fn api_process_transcript<R: Runtime>(
     summary_language: Option<String>,
     _auth_token: Option<String>,
 ) -> Result<ProcessTranscriptResponse, String> {
-    use uuid::Uuid;
-
-    let m_id = meeting_id.unwrap_or_else(|| format!("meeting-{}", Uuid::new_v4()));
-    log_info!(
-        "api_process_transcript (native) called for meeting_id: {}, model: {}",
-        &m_id,
-        &model
-    );
-
+    use futures_util::FutureExt;
+    let m_id = meeting_id
+        .filter(|id| !id.trim().is_empty())
+        .ok_or("INVALID_ARGUMENT: meeting_id is required")?;
     let pool = state.db_manager.pool().clone();
-    let final_prompt = custom_prompt.unwrap_or_else(|| "".to_string());
-    let final_template_id = template_id.unwrap_or_else(|| "daily_standup".to_string());
-
-    // Normalise empty / whitespace-only to None so "" and null behave identically
+    // The database snapshot includes every segment, even beyond the UI's page.
+    // Retain the legacy `text` argument for IPC compatibility; it is no longer
+    // the source of truth for background generation.
+    let _ = text;
+    let document = crate::meeting::MeetingDocumentService::new(pool.clone())
+        .snapshot(&m_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let text = document
+        .transcript
+        .iter()
+        .map(|s| match &s.speaker_name {
+            Some(name) => format!("{}: {}", name, s.text),
+            None => s.text.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.trim().is_empty() {
+        return Err("INVALID_ARGUMENT: meeting has no transcript".into());
+    }
+    let final_prompt = custom_prompt.unwrap_or_default();
+    let final_template_id = template_id.unwrap_or_else(|| "daily_standup".into());
     let summary_language = summary_language.and_then(|s| {
         let t = s.trim();
-        if t.is_empty() { None } else { Some(t.to_string()) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_owned())
+        }
     });
-
-    // ponytail: summary starts are rare; use per-meeting locks only if start contention is measured.
-    let _start_guard = SUMMARY_START_LOCK.lock().await;
-    let started_at = next_summary_start(Utc::now());
-    SummaryProcessesRepository::create_or_reset_process(&pool, &m_id, started_at)
-        .await
-        .map_err(|e| format!("Failed to initialize process: {}", e))?;
-
-    let chunk_size = _chunk_size.unwrap_or(40000);
-    let overlap = _overlap.unwrap_or(1000);
-    if let Err(error) = TranscriptChunksRepository::save_transcript_data(
+    let frozen = SummaryService::freeze_inputs(
         &pool,
         &m_id,
         &text,
         &model,
-        &model_name,
-        chunk_size,
-        overlap,
+        &final_template_id,
+        document.versions.clone(),
     )
-    .await
-    {
-        let message = format!("Failed to save transcript data: {}", error);
-        let _ = SummaryProcessesRepository::update_process_failed(
-            &pool,
+    .await?;
+    let params = serde_json::json!({"provider":model,"model":model_name,"prompt":final_prompt,"template_id":final_template_id,"language":summary_language,"text":text,"segments":document.transcript,"configuration":frozen.public_parameters()});
+    let jobs = state.jobs.clone();
+    let job = jobs
+        .enqueue(
+            crate::jobs::JobKind::Summary,
             &m_id,
-            started_at,
-            &message,
+            document.versions.revision,
+            params,
         )
-        .await;
-        return Err(message);
+        .await
+        .map_err(|e| e.to_string())?;
+    let _start_guard = SUMMARY_START_LOCK.lock().await;
+    let started_at = next_summary_start(Utc::now());
+    if let Err(error) = jobs
+        .attach_summary(
+            &job.id,
+            started_at,
+            &text,
+            &model,
+            &model_name,
+            _chunk_size.unwrap_or(40000),
+            _overlap.unwrap_or(1000),
+        )
+        .await
+    {
+        let _ = jobs.fail(&job.id, &error.code).await;
+        return Err(error.to_string());
     }
-
-    let cancellation_token =
-        SummaryService::register_cancellation_token(&m_id, started_at);
-    let meeting_id_clone = m_id.clone();
+    let token = jobs.cancellation(&job.id);
+    SummaryService::register_job_cancellation(&m_id, started_at, token.clone());
+    let job_id = job.id.clone();
     tauri::async_runtime::spawn(async move {
-        SummaryService::process_transcript_background(
-            app,
-            pool,
-            meeting_id_clone,
-            started_at,
-            cancellation_token,
-            text,
-            model,
-            model_name,
-            final_prompt,
-            final_template_id,
-            summary_language,
-        )
-        .await;
+        match jobs.start(&job_id).await {
+            Ok(_lease) => {
+                // Await cooperative cleanup: the BuiltInAI sidecar must finish
+                // its shutdown before the heavy-job permit is released.
+                let result =
+                    std::panic::AssertUnwindSafe(SummaryService::process_transcript_background(
+                        app,
+                        pool.clone(),
+                        m_id.clone(),
+                        started_at,
+                        token,
+                        text,
+                        model,
+                        model_name,
+                        final_prompt,
+                        final_template_id,
+                        summary_language,
+                        frozen,
+                    ))
+                    .catch_unwind()
+                    .await;
+                let unfinished = jobs.get(&job_id).await.is_ok_and(|j| j.status == "running");
+                if result.is_err() || unfinished {
+                    let _ = jobs
+                        .fail(&job_id, if result.is_err() { "PANIC" } else { "IO_ERROR" })
+                        .await;
+                    let _ = SummaryProcessesRepository::update_process_failed(
+                        &pool,
+                        &m_id,
+                        started_at,
+                        "Summary processing stopped before committing a result. Retry explicitly.",
+                    )
+                    .await;
+                }
+            }
+            Err(error) => {
+                if error.code != "CANCELLED" {
+                    let _ = SummaryProcessesRepository::update_process_failed(
+                        &pool,
+                        &m_id,
+                        started_at,
+                        &error.to_string(),
+                    )
+                    .await;
+                    let _ = jobs.fail(&job_id, &error.code).await;
+                }
+            }
+        }
+        SummaryService::cleanup_cancellation_token(&m_id, started_at);
+        jobs.release_context(&job_id);
     });
-
-    log_info!("🚀 Background task spawned for meeting_id: {}", &m_id);
     Ok(ProcessTranscriptResponse {
-        message: "Summary generation started".to_string(),
+        message: "Summary job queued".into(),
         process_id: started_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
+        job,
     })
 }
 
@@ -507,6 +585,20 @@ pub async fn api_cancel_summary<R: Runtime>(
         .with_timezone(&Utc);
     log_info!("api_cancel_summary called for meeting_id: {}", meeting_id);
 
+    if let Some(job) =
+        crate::jobs::repository::attempt(state.db_manager.pool(), &meeting_id, started_at)
+            .await
+            .map_err(|e| e.to_string())?
+    {
+        let job = state
+            .jobs
+            .cancel(&job.id)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(
+            serde_json::json!({"cancelled":job.status=="cancelled","meeting_id":meeting_id,"job":job}),
+        );
+    }
     let cancellation_requested = SummaryService::cancel_summary(&meeting_id, started_at);
     let cancelled = if cancellation_requested {
         let pool = state.db_manager.pool();
@@ -514,15 +606,25 @@ pub async fn api_cancel_summary<R: Runtime>(
             .await
         {
             Ok(true) => {
-                log_info!("Successfully cancelled summary generation for meeting_id: {}", meeting_id);
+                log_info!(
+                    "Successfully cancelled summary generation for meeting_id: {}",
+                    meeting_id
+                );
                 true
             }
             Ok(false) => {
-                log_info!("Summary generation was already terminal for meeting_id: {}", meeting_id);
+                log_info!(
+                    "Summary generation was already terminal for meeting_id: {}",
+                    meeting_id
+                );
                 false
             }
             Err(error) => {
-                log_error!("Failed to update cancellation status for {}: {}", meeting_id, error);
+                log_error!(
+                    "Failed to update cancellation status for {}: {}",
+                    meeting_id,
+                    error
+                );
                 return Err(format!("Failed to update cancellation status: {}", error));
             }
         }
@@ -568,10 +670,7 @@ mod tests {
     #[test]
     fn summary_start_tokens_are_monotonic_with_identical_clock_inputs() {
         let first = next_summary_start(Utc::now());
-        assert_eq!(
-            next_summary_start(first),
-            first + Duration::nanoseconds(1)
-        );
+        assert_eq!(next_summary_start(first), first + Duration::nanoseconds(1));
     }
 
     #[test]

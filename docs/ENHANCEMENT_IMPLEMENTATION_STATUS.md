@@ -19,11 +19,22 @@
 - 共享摘要校验拒绝无正文标题、空代码块和模型推理标记；快照不暴露带推理标记的历史摘要。
 - Sidebar用native AppState就绪和database-initialized事件加载会议/模型；退役无前端调用的旧profile/FastAPI连接诊断及5167/8178 CSP。
 
-F2验证：Rust253 pass / 0 fail / 3 ignored；前端50 pass / 0 fail，Node17 pass；类型检查、Next生产构建通过。Rust/TypeScript读取同一个公共JSON fixture。迁移回归先在原十个迁移后填旧数据，再升级，检查文本、时间、笔记JSON与外键删除行为。没有对用户历史会议运行删除或效果验收。
+F2提交 `cea601d`。验证：Rust253 pass / 0 fail / 3 ignored；前端50 pass / 0 fail，Node17 pass；类型检查、Next生产构建通过。Rust/TypeScript读取同一个公共JSON fixture。迁移回归先在原十个迁移后填旧数据，再升级，检查文本、时间、笔记JSON与外键删除行为。没有对用户历史会议运行删除或效果验收。
+
+### P0 / F3：持久有界任务与摘要来源保护
+
+- 任务与来源版本保存在 SQLite，单个重任务执行、最多16个排队任务；多连接 WAL 并发入队验证容量不会穿透。
+- 摘要使用完整数据库快照，冻结转写/说话人、模型、模板、提示词与语言。密钥仅留内存，公共Job DTO不含参数和密钥。
+- 排队期间来源变化会在调用provider前拒绝；运行期间变化则保留生成结果为stale，任务CONFLICT，不覆盖当前摘要/人工编辑。
+- 结果、canonical摘要、摘要版本、生成标题与succeeded同事务提交；取消同步投影旧摘要状态，保留可读结果，晚到结果不能把已取消任务变成成功。
+- 所有启动入口共享JobService；重启将queued/running标记interrupted，同时结束遗留pending摘要，必须显式重新提交。不会自动重发收费provider请求。
+- 统一Job状态展示排队/执行/失败/取消/重启中断；排队时间不计入provider执行超时。保留旧摘要轮询与取消入口。
+- 现有英文缓存指纹增加转写/说话人版本；生成自己的摘要/标题写入不会使同源语言切换缓存失效。
+
+F3验证：Rust264 pass / 0 fail / 3 ignored；来源覆盖、取消晚到、恢复投影、冻结配置、模板路径校验与8连接并发测试通过。前端52 pass / 0 fail，Node17 pass，任务状态与长时间排队回归、类型检查、Next生产构建通过。未调用用户配置的收费provider。
 
 ## 接下来实施
 
-- P0/F3：持久、有界后台任务，取消、重启中断及摘要来源冲突。
 - P0/F4：数据库恢复材料保护、有界实时积压与补处理、全provider中文token预算。
 - P3/A1–A5：loopback授权gateway、只读与后续写入/录音、CLI/MCP、事务事件Webhook。
 - P4/D1–D5：本机模型/时间探针，真实时间映射、版本化分离结果和人工纠正。用户确认使用本机；带说话人标注的中文会议音频仍缺，不能据公共样例宣称DER或中文业务效果通过。

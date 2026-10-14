@@ -34,3 +34,11 @@ export const MeetingDocumentSchema = z.object({
 }).strict();
 export type MeetingDocument = z.infer<typeof MeetingDocumentSchema>;
 export interface EnhancementError { code: string; message: string }
+
+export const JobSnapshotSchema = z.object({
+  id: z.string(), meeting_id: z.string(), kind: z.enum(['summary', 'export', 'diarization']),
+  status: z.enum(['queued', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted']),
+  source_revision: Revision, progress: z.number().min(0).max(1), error_code: z.string().nullable(),
+  created_at: z.string(), updated_at: z.string(),
+}).strict();
+export type JobSnapshot = z.infer<typeof JobSnapshotSchema>;

@@ -99,11 +99,28 @@ impl SummaryProcessesRepository {
         chunk_count: i64,
         processing_time: f64,
     ) -> Result<bool, sqlx::Error> {
-        let mut transaction = pool.begin().await?;
+        let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
         let now = Utc::now();
         let result_str = serde_json::to_string(&result)
             .map_err(|e| sqlx::Error::Protocol(format!("Failed to serialize result: {}", e)))?;
 
+        let job: Option<(String,i64,String)> = sqlx::query_as("SELECT j.id,j.source_revision,j.status FROM enhancement_jobs j JOIN summary_job_context c ON c.job_id=j.id WHERE c.meeting_id=? AND c.started_at=?")
+            .bind(meeting_id).bind(started_at).fetch_optional(&mut *transaction).await?;
+        if let Some((id, source_revision, status)) = &job {
+            if status != "running" {
+                return Ok(false);
+            }
+            let current =
+                crate::database::repositories::content_version::read(&mut transaction, meeting_id)
+                    .await?;
+            if current.revision != *source_revision {
+                sqlx::query("INSERT INTO enhancement_job_results(job_id,source_revision,result_json,stale,created_at) VALUES(?,?,?,1,?)")
+                    .bind(id).bind(source_revision).bind(&result_str).bind(now).execute(&mut *transaction).await?;
+                Self::terminate_in_transaction(&mut transaction, meeting_id, started_at, "failed", "CONFLICT", "Meeting content changed during generation. The generated attempt is retained as stale; current content is preserved.").await?;
+                transaction.commit().await?;
+                return Ok(false);
+            }
+        }
         let update = sqlx::query(
             r#"
             UPDATE summary_processes
@@ -131,6 +148,44 @@ impl SummaryProcessesRepository {
             sqlx::query("INSERT INTO meeting_document_content(meeting_id,summary_markdown,summary_source_transcript_revision,summary_source_speaker_revision) VALUES(?,?,?,?) ON CONFLICT(meeting_id) DO UPDATE SET summary_markdown=excluded.summary_markdown,summary_source_transcript_revision=excluded.summary_source_transcript_revision,summary_source_speaker_revision=excluded.summary_source_speaker_revision")
                 .bind(meeting_id).bind(markdown).bind(versions.transcript_revision).bind(versions.speaker_revision).execute(&mut *transaction).await?;
         }
+        if update.rows_affected() == 1 {
+            if let Some((id, source_revision, _)) = &job {
+                sqlx::query("INSERT INTO enhancement_job_results(job_id,source_revision,result_json,stale,created_at) VALUES(?,?,?,0,?)")
+                    .bind(id).bind(source_revision).bind(&result_str).bind(now).execute(&mut *transaction).await?;
+                sqlx::query("UPDATE enhancement_jobs SET status='succeeded',progress=1,error_code=NULL,updated_at=? WHERE id=? AND status='running'")
+                    .bind(now).bind(id).execute(&mut *transaction).await?;
+            }
+            // Generated titles share the completion transaction and source check.
+            if let Some(name) = result
+                .get("generated_title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && s.chars().count() <= 256)
+            {
+                let changed =
+                    sqlx::query("UPDATE meetings SET title=?,updated_at=? WHERE id=? AND title!=?")
+                        .bind(name)
+                        .bind(now)
+                        .bind(meeting_id)
+                        .bind(name)
+                        .execute(&mut *transaction)
+                        .await?
+                        .rows_affected();
+                if changed == 1 {
+                    sqlx::query("UPDATE transcript_chunks SET meeting_name=? WHERE meeting_id=?")
+                        .bind(name)
+                        .bind(meeting_id)
+                        .execute(&mut *transaction)
+                        .await?;
+                    crate::database::repositories::content_version::bump(
+                        &mut transaction,
+                        meeting_id,
+                        crate::database::repositories::content_version::ContentKind::Title,
+                    )
+                    .await?;
+                }
+            }
+        }
         transaction.commit().await?;
         Ok(update.rows_affected() == 1)
     }
@@ -141,30 +196,18 @@ impl SummaryProcessesRepository {
         started_at: DateTime<Utc>,
         error: &str,
     ) -> Result<bool, sqlx::Error> {
-        let now = Utc::now();
-
-        let update = sqlx::query(
-            r#"
-            UPDATE summary_processes
-            SET
-                status = 'failed',
-                error = ?,
-                updated_at = ?,
-                end_time = ?,
-                result = COALESCE(result_backup, result),
-                result_backup = NULL,
-                result_backup_timestamp = NULL
-            WHERE meeting_id = ? AND start_time = ? AND LOWER(status) = 'pending'
-            "#,
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        let changed = Self::terminate_in_transaction(
+            &mut tx,
+            meeting_id,
+            started_at,
+            "failed",
+            "PROVIDER_ERROR",
+            error,
         )
-        .bind(error)
-        .bind(now)
-        .bind(now)
-        .bind(meeting_id)
-        .bind(started_at)
-        .execute(pool)
         .await?;
-        Ok(update.rows_affected() == 1)
+        tx.commit().await?;
+        Ok(changed)
     }
 
     pub async fn update_process_cancelled(
@@ -172,28 +215,46 @@ impl SummaryProcessesRepository {
         meeting_id: &str,
         started_at: DateTime<Utc>,
     ) -> Result<bool, sqlx::Error> {
-        let now = Utc::now();
-
-        let update = sqlx::query(
-            r#"
-            UPDATE summary_processes
-            SET
-                status = 'cancelled',
-                updated_at = ?,
-                end_time = ?,
-                error = 'Generation was cancelled by user',
-                result = COALESCE(result_backup, result),
-                result_backup = NULL,
-                result_backup_timestamp = NULL
-            WHERE meeting_id = ? AND start_time = ? AND LOWER(status) = 'pending'
-            "#,
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        let changed = Self::terminate_in_transaction(
+            &mut tx,
+            meeting_id,
+            started_at,
+            "cancelled",
+            "CANCELLED",
+            "Generation was cancelled by user",
         )
-        .bind(now)
-        .bind(now)
-        .bind(meeting_id)
-        .bind(started_at)
-        .execute(pool)
         .await?;
+        tx.commit().await?;
+        Ok(changed)
+    }
+
+    pub(crate) async fn terminate_in_transaction(
+        conn: &mut sqlx::SqliteConnection,
+        meeting_id: &str,
+        started_at: DateTime<Utc>,
+        status: &str,
+        code: &str,
+        message: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let job: Option<(String,i64)> = sqlx::query_as("SELECT j.id,j.source_revision FROM enhancement_jobs j JOIN summary_job_context c ON c.job_id=j.id WHERE c.meeting_id=? AND c.started_at=?")
+            .bind(meeting_id).bind(started_at).fetch_optional(&mut *conn).await?;
+        let restore = match &job {
+            Some((_, revision)) => {
+                crate::database::repositories::content_version::read(conn, meeting_id)
+                    .await?
+                    .revision
+                    == *revision
+            }
+            None => true,
+        };
+        let now = Utc::now();
+        let update = sqlx::query("UPDATE summary_processes SET status=?,error=?,updated_at=?,end_time=?,result=CASE WHEN ? THEN COALESCE(result_backup,result) ELSE result END,result_backup=NULL,result_backup_timestamp=NULL WHERE meeting_id=? AND start_time=? AND LOWER(status)='pending'")
+            .bind(status).bind(message).bind(now).bind(now).bind(restore).bind(meeting_id).bind(started_at).execute(&mut *conn).await?;
+        if let Some((id, _)) = job {
+            sqlx::query("UPDATE enhancement_jobs SET status=?,error_code=?,updated_at=? WHERE id=? AND status IN ('queued','running')")
+                .bind(status).bind(code).bind(now).bind(id).execute(&mut *conn).await?;
+        }
         Ok(update.rows_affected() == 1)
     }
 }

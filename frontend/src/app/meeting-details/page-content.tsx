@@ -221,6 +221,7 @@ export default function PageContent({
           }
           summary={
             <SummaryPanel
+              job={summaryGeneration.job}
               meeting={meeting}
               meetingTitle={meetingData.meetingTitle}
               summaryRef={meetingData.blockNoteSummaryRef}
