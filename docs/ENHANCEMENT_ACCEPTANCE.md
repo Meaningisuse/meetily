@@ -56,3 +56,5 @@ P4 D1已将OpenSLR AliMeeting Test归档生成20个仓库外匿名样本，合�
 D2时间精度补充验收：在AliMeeting Test同一会议的10段无重叠标注语句中，`ggml-base`双解码3/10返回`Exact`，7/10安全返回`Unavailable`。3个`Exact`的起点均早300毫秒；结束边界误差为+110、+200、+80毫秒，均未达到±250毫秒精度门槛；首段ASR还漏词并误识一个词。实验性Whisper token对齐仍未达门槛并已撤回。该结果证明此前`Exact`仅代表解码一致/范围合法，并未满足时间精度验收。代码现以回归测试确保未验证候选不再导出为exact子段；首个裁片复跑后返回`Approximate`且不导出候选时间。详细数据与复现方式见`DIARIZATION_SPIKE_RESULTS.md`。独立强制对齐、三入口试听仍待验收，D2及P4尚未完成。
 
 新的D1候选可行性检查：NVIDIA NeMo-Speech.cpp v0.2.0 在 Apple Silicon 本机成功构建 standalone diarization C API 的 Metal preset。Nemotron 3 Diarization Q8_0 artifact 的模型许可为 OpenMDW-1.1；尚未下载权重，也没有执行模型推理。官方模型卡的 AliMeeting Test Far DER 10.47% 仅作候选资料，不能替代本机评测。条款授权待用户回复；D1仍NO-GO，D3–D5保持暂停。
+
+D2映射安全补充：为统一实时录音、catch-up、导入、重转写的 provider 局部时间映射，新增长度/顺序/文本/溢出校验；任一分段越界或偏移溢出时整组回退到 canonical 文本和整段 approximate 范围。回归覆盖非零源偏移、跨词序列映射、越界与整数溢出；`cargo test --locked -p meetily --lib` 为333通过、0失败、6忽略。修改后的 release `.app` 打包成功，严格签名校验通过，主程序 SHA-256 `01d7247c811e4962d75203ef1a72945b4f112880ade4bb010fc020a1263cc032`；未公证，也未启动录音。D2仍缺独立标注精度通过和三入口试听。

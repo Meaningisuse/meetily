@@ -77,6 +77,39 @@ pub struct TimedText {
     pub end_ms: i64,
 }
 
+/// Validate provider-relative word/segment times and move them onto the original recording clock.
+/// Invalid or overflowing timing invalidates the whole set so callers can keep their coarse bounds.
+pub fn offset_timed_segments(
+    segments: Vec<TimedText>,
+    source_offset_ms: i64,
+    source_duration_ms: i64,
+) -> Option<Vec<TimedText>> {
+    if segments.is_empty() || source_offset_ms < 0 || source_duration_ms <= 0 {
+        return None;
+    }
+    source_offset_ms.checked_add(source_duration_ms)?;
+
+    let mut previous_start_ms = None;
+    let mut mapped = Vec::with_capacity(segments.len());
+    for segment in segments {
+        if segment.text.trim().is_empty()
+            || segment.start_ms < 0
+            || segment.end_ms <= segment.start_ms
+            || segment.end_ms > source_duration_ms
+            || previous_start_ms.is_some_and(|previous| segment.start_ms < previous)
+        {
+            return None;
+        }
+        previous_start_ms = Some(segment.start_ms);
+        mapped.push(TimedText {
+            text: segment.text,
+            start_ms: source_offset_ms.checked_add(segment.start_ms)?,
+            end_ms: source_offset_ms.checked_add(segment.end_ms)?,
+        });
+    }
+    Some(mapped)
+}
+
 /// Unified transcription result across all providers
 #[derive(Debug, Clone)]
 pub struct TranscriptResult {
@@ -101,7 +134,7 @@ impl TranscriptResult {
 
 #[cfg(test)]
 mod timing_tests {
-    use super::{TimingPrecision, TranscriptResult};
+    use super::{TimedText, TimingPrecision, TranscriptResult, offset_timed_segments};
 
     #[test]
     fn unavailable_timing_remains_unknown() {
@@ -123,6 +156,62 @@ mod timing_tests {
         assert_eq!(
             TimingPrecision::from_audio_bounds(Some(f64::NAN), Some(2.0)),
             TimingPrecision::Unavailable
+        );
+    }
+
+    #[test]
+    fn timed_segments_are_offset_into_the_original_recording_clock() {
+        let mapped = offset_timed_segments(
+            vec![
+                TimedText {
+                    text: "first".into(),
+                    start_ms: 120,
+                    end_ms: 480,
+                },
+                TimedText {
+                    text: "second".into(),
+                    start_ms: 480,
+                    end_ms: 800,
+                },
+            ],
+            12_000,
+            1_000,
+        )
+        .unwrap();
+
+        assert_eq!(mapped[0].start_ms, 12_120);
+        assert_eq!(mapped[0].end_ms, 12_480);
+        assert_eq!(mapped[1].start_ms, 12_480);
+        assert_eq!(mapped[1].end_ms, 12_800);
+    }
+
+    #[test]
+    fn invalid_local_timing_falls_back_as_a_whole_without_partial_offsets() {
+        let invalid = vec![
+            TimedText {
+                text: "valid".into(),
+                start_ms: 100,
+                end_ms: 200,
+            },
+            TimedText {
+                text: "outside audio".into(),
+                start_ms: 900,
+                end_ms: 1_100,
+            },
+        ];
+
+        assert!(offset_timed_segments(invalid, 12_000, 1_000).is_none());
+        assert!(
+            offset_timed_segments(
+                vec![TimedText {
+                    text: "overflow".into(),
+                    start_ms: 1,
+                    end_ms: 2,
+                }],
+                i64::MAX - 1,
+                10,
+            )
+            .is_none()
         );
     }
 }

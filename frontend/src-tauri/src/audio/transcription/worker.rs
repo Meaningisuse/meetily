@@ -3,7 +3,7 @@
 // Parallel transcription worker pool and chunk processing logic.
 
 use super::engine::TranscriptionEngine;
-use super::provider::{TimedText, TimingPrecision, TranscriptionError};
+use super::provider::{offset_timed_segments, TimedText, TimingPrecision, TranscriptionError};
 use crate::audio::AudioChunk;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -216,6 +216,16 @@ pub fn start_transcription_task<R: Runtime>(
                                         let sequence_id = chunk_id;
                                         let audio_start_time = chunk_timestamp; // Already in seconds from recording start
                                         let audio_end_time = chunk_timestamp + chunk_duration;
+                                        let mapped_timed_segments =
+                                            if provider_precision != TimingPrecision::Unavailable {
+                                                offset_timed_segments(
+                                                    timed_segments,
+                                                    (chunk_timestamp * 1000.0).round() as i64,
+                                                    (chunk_duration * 1000.0).round() as i64,
+                                                )
+                                            } else {
+                                                None
+                                            };
 
                                         // Save structured transcript segment to recording manager (only final results)
                                         // Save ALL segments (partial and final) to ensure complete JSON
@@ -238,9 +248,7 @@ pub fn start_transcription_task<R: Runtime>(
                                             audio_start_time,
                                             audio_end_time,
                                             duration: chunk_duration,
-                                            timing_precision: if !timed_segments.is_empty()
-                                                && provider_precision != TimingPrecision::Unavailable
-                                            {
+                                            timing_precision: if mapped_timed_segments.is_some() {
                                                 provider_precision
                                             } else {
                                                 TimingPrecision::from_audio_bounds(
@@ -248,18 +256,7 @@ pub fn start_transcription_task<R: Runtime>(
                                                     Some(audio_end_time),
                                                 )
                                             },
-                                            timed_segments: if !timed_segments.is_empty()
-                                                && provider_precision != TimingPrecision::Unavailable
-                                            {
-                                                let offset_ms = (chunk_timestamp * 1000.0).round() as i64;
-                                                timed_segments.into_iter().map(|mut timed| {
-                                                    timed.start_ms = timed.start_ms.saturating_add(offset_ms);
-                                                    timed.end_ms = timed.end_ms.saturating_add(offset_ms);
-                                                    timed
-                                                }).collect()
-                                            } else {
-                                                Vec::new()
-                                            },
+                                            timed_segments: mapped_timed_segments.unwrap_or_default(),
                                         };
 
                                         if let Some(store)=&catchup_store {

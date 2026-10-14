@@ -2,7 +2,7 @@
 use super::{
     transcription::{
         engine,
-        provider::TimingPrecision,
+        provider::{offset_timed_segments, TimingPrecision},
         worker::{transcribe_chunk_with_provider, TranscriptUpdate},
     },
     work_queue::AudioWorkReceiver,
@@ -60,7 +60,7 @@ pub async fn recover_transcription_backlog(
             let id = chunk.chunk_id;
             let start = chunk.timestamp;
             let duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
-            let (text, confidence, is_partial, mut timed_segments, provider_precision) =
+            let (text, confidence, is_partial, timed_segments, provider_precision) =
                 transcribe_chunk_with_provider(&engine, chunk, &app)
                     .await
                     .map_err(|e| e.to_string())?;
@@ -70,6 +70,16 @@ pub async fn recover_transcription_backlog(
                         .into(),
                 );
             }
+            let mapped_timed_segments =
+                if provider_precision != TimingPrecision::Unavailable {
+                    offset_timed_segments(
+                        timed_segments,
+                        (start * 1000.0).round() as i64,
+                        (duration * 1000.0).round() as i64,
+                    )
+                } else {
+                    None
+                };
             let result = TranscriptUpdate {
                 text,
                 timestamp: format!("{:02}:{:02}", start as u64 / 60, start as u64 % 60),
@@ -81,25 +91,12 @@ pub async fn recover_transcription_backlog(
                 audio_start_time: start,
                 audio_end_time: start + duration,
                 duration,
-                timing_precision: if !timed_segments.is_empty()
-                    && provider_precision != TimingPrecision::Unavailable
-                {
+                timing_precision: if mapped_timed_segments.is_some() {
                     provider_precision
                 } else {
                     TimingPrecision::from_audio_bounds(Some(start), Some(start + duration))
                 },
-                timed_segments: if !timed_segments.is_empty()
-                    && provider_precision != TimingPrecision::Unavailable
-                {
-                    let offset_ms = (start * 1000.0).round() as i64;
-                    for timed in &mut timed_segments {
-                        timed.start_ms = timed.start_ms.saturating_add(offset_ms);
-                        timed.end_ms = timed.end_ms.saturating_add(offset_ms);
-                    }
-                    timed_segments
-                } else {
-                    Vec::new()
-                },
+                timed_segments: mapped_timed_segments.unwrap_or_default(),
             };
             store
                 .complete(

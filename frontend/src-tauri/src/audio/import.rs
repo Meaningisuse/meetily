@@ -2,7 +2,7 @@
 
 use crate::api::TranscriptSegment;
 use crate::audio::decoder::{decode_audio_file, decode_audio_file_with_progress};
-use crate::audio::transcription::TimingPrecision;
+use crate::audio::transcription::{provider::offset_timed_segments, TimingPrecision};
 use crate::audio::vad::get_speech_chunks_with_progress;
 use crate::config::{DEFAULT_WHISPER_MODEL, DEFAULT_PARAKEET_MODEL};
 use crate::parakeet_engine::ParakeetEngine;
@@ -604,6 +604,15 @@ async fn run_import<R: Runtime>(
                 .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
             (text, conf, timed, precision)
         };
+        let mapped_timed_segments = if timing_precision != TimingPrecision::Unavailable {
+            offset_timed_segments(
+                timed_segments,
+                segment.start_timestamp_ms.round() as i64,
+                (segment.end_timestamp_ms - segment.start_timestamp_ms).round() as i64,
+            )
+        } else {
+            None
+        };
 
         let trimmed = text.trim();
         if !trimmed.is_empty() {
@@ -613,12 +622,12 @@ async fn run_import<R: Runtime>(
                 i + 1, processable_count, segment_duration_sec, conf,
                 if trimmed.len() > 80 { let mut end = 80; while !trimmed.is_char_boundary(end) { end -= 1; } &trimmed[..end] } else { trimmed }
             );
-            if timing_precision != TimingPrecision::Unavailable && !timed_segments.is_empty() {
-                for timed in timed_segments {
+            if let Some(mapped_segments) = mapped_timed_segments {
+                for timed in mapped_segments {
                     all_transcripts.push(TranscriptInput {
                         text: timed.text,
-                        start_ms: segment.start_timestamp_ms + timed.start_ms as f64,
-                        end_ms: segment.start_timestamp_ms + timed.end_ms as f64,
+                        start_ms: timed.start_ms as f64,
+                        end_ms: timed.end_ms as f64,
                         timing_precision,
                     });
                 }
