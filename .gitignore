@@ -79,6 +79,13 @@ target/
 
 frontend/src-tauri/binaries/
 
+# Private diarization samples, annotations, weights, and probe output.
+scripts/diarization-probe/results/
+frontend/src-tauri/tests/fixtures/diarization/audio/
+frontend/src-tauri/tests/fixtures/diarization/*.rttm
+frontend/src-tauri/tests/fixtures/diarization/models/
+frontend/src-tauri/tests/fixtures/diarization/results/
+
 # Licensed assets of the maintained Silero dependency are build inputs.
 !vendor/silero/models/
 !vendor/silero/models/silero_vad.onnx
