@@ -39,7 +39,7 @@ P0工程任务完成不意味着上述实际运行/业务验收已完成。P3、
 
 ## 2026-10-14 本轮重新验证
 
-- `scripts/check-enhancement.sh --all`（2026-10-14最新运行）：Node行为回归17通过；Bun前端57通过；TypeScript检查、Next静态生产构建、automation-client构建及5项客户端测试、Secure MCP Tunnel启动器隔离测试通过；原生helper构建；Rust库测试326通过、0失败、4忽略。Bun 1.3.14、CMake 3.31.6使用任务临时路径与`PYTHONPATH`，未修改全局安装。构建中有既存编译warning，但命令退出码为0。
+- `scripts/check-enhancement.sh --all`（Whisper时间降级修正后的复核）：Node行为回归17通过；Bun前端57通过；TypeScript检查、Next静态生产构建、automation-client构建及5项客户端测试、Secure MCP Tunnel启动器隔离测试通过；原生helper构建；Rust库测试327通过、0失败、5忽略。Bun 1.3.14、CMake 3.31.6使用任务临时路径与`PYTHONPATH`，未修改全局安装。构建中有既存编译warning，但命令退出码为0。
 - 最终DER fixture变更后，`scripts/check-enhancement.sh --native`：Rust库测试318通过、0失败、3忽略；定向 `rustfmt --check` 通过。
 - `scripts/check-enhancement.sh --native`（Whisper时间精度修正后）：Rust库测试327通过、0失败、5忽略；本机公开标注裁片验证候选时间返回`Approximate`并不再导出子片段时间。首次运行缺临时CMake路径，补入 `/private/tmp/meetily-cmake-3.31.6/cmake/data/bin` 后通过。
 - `scripts/check-enhancement.sh --bundle`：release helper与Tauri macOS `.app` 打包成功，产物位于 `target/release/bundle/macos/meetily.app`。本次只验证构建/签名，不代表启动或实际设备录音；未配置Apple notarization凭证，因此跳过公证。
