@@ -63,7 +63,7 @@ The model is under OpenMDW-1.1, which is distinct from the runtime's Apache-2.0 
 
 The NVIDIA NeMo-Speech.cpp v0.2.0 source index also lists `nvidia/diar_streaming_sortformer_4spk-v2` at revision `5240a64075176943f677d30fa2171c780229f341`, with a 147,075,776-byte Q8_0 GGUF (SHA-256 `0679cfeb1ce356d0dea9470b31274f4bfc7eb927497d82005483770666da998a`). Its model card declares CC BY 4.0 and says downloading the public release accepts that license. The card documents a four-speaker limit, 80 ms output frames, and cautions that the model is primarily English and may degrade on non-English data; it gives no AliMeeting Test Far score for this v2 checkpoint. Keep those limits separate from the v3 Nemotron claims above: [Sortformer v2 model card](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2).
 
-At source revision `6a3ca369370782acee0dd155e34394ba60b920c4`, the standalone Sortformer C ABI exports create, stream-open, audio-push, finish, and segment-accessor symbols. A local arm64 `metal-diar` build of `nemo_speech_asr_c` completed in `/private/tmp`; the dynamic library links `libggml-metal`, `libggml-cpu`, and `libggml-blas` and has SHA-256 `553a690b598c96a2c4947f239511c35c0f4c30e85740217f21595104af3f0dca`. A repeat target build, symbol check, and linkage check passed. This establishes source/build/API feasibility only. No Sortformer weight was downloaded or run: authorization to accept CC BY 4.0 for local-only AliMeeting evaluation is pending. The model and runtime remain unbundled unless quality, long-duration, resource, cancellation, and redistribution gates pass independently.
+At source revision `6a3ca369370782acee0dd155e34394ba60b920c4`, the standalone Sortformer C ABI exports create, stream-open, audio-push, finish, and segment-accessor symbols. A local arm64 `metal-diar` build of `nemo_speech_asr_c` completed in `/private/tmp`; the dynamic library links `libggml-metal`, `libggml-cpu`, and `libggml-blas` and has SHA-256 `553a690b598c96a2c4947f239511c35c0f4c30e85740217f21595104af3f0dca`. A repeat target build, symbol check, and linkage check passed. This initial screen established source/build/API feasibility only. At that point no Sortformer weight had been downloaded or run; the subsequent local evaluation and its limits are recorded below. The model and runtime remain unbundled unless quality, long-duration, resource, cancellation, and redistribution gates pass independently.
 
 Input-channel follow-up: on the first development meeting, sherpa with an oracle 4-speaker count scored 17.08% DER / 24.89% overlap DER on the prepared 8-channel average-downmix. Using raw channel 0 alone scored 34.19% / 37.39%. This rejects the simple single-channel-0 substitution for this sample; it does not evaluate beamforming or other channel combinations.
 
@@ -88,3 +88,34 @@ A model-backed smoke regression also ran through `WhisperEngine::transcribe_audi
 The prior SIGSEGV was isolated to the restricted test sandbox: `MTLCreateSystemDefaultDevice()` returned `nil` there, while a read-only probe outside the sandbox enumerated Apple M5. The whisper.cpp Metal path then loaded the model and completed inference when run outside the sandbox. This is an environment limitation, not evidence of a Meetily Metal defect. A CPU probe used the public AliMeeting Test sample: with `ggml-tiny`, the first 120 seconds and eight 30-second speech-rich windows all completed the dual-decode test, but every window safely returned `Unavailable` because canonical and timestamp-pass text differed. A same-window `ggml-base` run also returned `Unavailable`. The logs and clips remain outside Git. These runs verify fallback on real Chinese meeting audio, not timestamp accuracy. Three-entry playback and comparison of emitted exact segments against independent word/time annotation remain unverified. D2 therefore remains incomplete, and no real-meeting or diarization-quality claim is made.
 
 An additional annotation-backed diagnostic used the public first-session far-field WAV (`sample-01.wav`, SHA-256 `8d3c67b104da4746ea9c3e8130dbedc4e50fd3486b70a4a8b67ffa3b8406a56e`) and its paired public TextGrid. Ten isolated, non-overlapping utterances from this one meeting were cropped with 250–300 ms of leading silence and at least 230 ms of trailing context. With `ggml-base`, 3/10 dual decodes agreed and returned `Exact`; the other 7 safely returned `Unavailable`. All three `Exact` starts were 0 ms despite the 300 ms leading context. Their measured/reference intervals and boundary errors were: 0–2880 vs 300–2770 ms (-300/+110 ms), 0–3580 vs 300–3380 ms (-300/+200 ms), and 0–4960 vs 300–4880 ms (-300/+80 ms). None met the diagnostic ±250 ms tolerance. In the first crop, ASR also omitted the initial “那” and rendered “工作日” as “公会日”. This confirms that `Exact` currently denotes agreement between decoder passes plus valid ranges, not independently demonstrated timing or transcription accuracy. Reproduce with ignored test `alimeeting_timestamp_probe_reports_annotation_errors`, setting `WHISPER_TIMING_TEST_MODEL`, `WHISPER_TIMING_TEST_AUDIO`, and crop-relative `WHISPER_TIMING_REFERENCE_START_MS` / `WHISPER_TIMING_REFERENCE_END_MS`; crop data and model stay private. A temporary experiment enabling whisper-rs experimental token alignment on the first crop kept the start at 0 ms and moved the end to 2.81 s; it still failed tolerance and was reverted. These ten intervals are from a single meeting, not an independent session-level sample. Audio, TextGrid, crops, model weights, and logs remain outside Git. D2 remains incomplete; independent-session timing evidence and three-entry playback are still required.
+
+
+### Sortformer v2 local AliMeeting Test diagnostic (2026-10-14)
+
+The user authorized downloading and evaluating the CC BY 4.0 model locally on the public AliMeeting Test set, with no packaging or distribution. NVIDIA NeMo-Speech.cpp v0.2.0 was built for Apple M5 Metal outside the repository. The pinned Q8_0 model is 147,075,776 bytes, SHA-256 `0679cfeb1ce356d0dea9470b31274f4bfc7eb927497d82005483770666da998a`; weights, executable, audio, RTTM, and per-file outputs remain under `/private/tmp`, not Git. The command used the model defaults, Metal, and concurrency 1. The 30-second smoke crop from `sample-01` (offset 8 seconds) scored 10.22% DER excluding overlap and 14.83% including overlap. The remaining 19 meetings were then evaluated in one frozen batch: 612.149 minutes, 19/19 completed, zero failures, 982.78 seconds wall time (RTF 0.0268), and peak RSS 1,248,722,944 bytes (about 1.16 GiB).
+
+The 19-session aggregate scored 4.03% micro / 4.37% macro DER excluding reference overlap, and 7.89% micro / 7.52% macro DER including overlap; each of the 19 sessions was below 20% DER. There were 10,411 predicted turns and 15,492 reference turns. The scorer uses the probe's 10 ms frame-center semantics, 250 ms reference collar, and global one-to-one maximum-overlap mapping. A 30-second crop was cross-checked against `run_probe.der` and matched exactly (10.2217% / 14.8311%). The crop is diagnostic only; it is not included in the 19-session aggregate.
+
+| Anonymous sample | DER (overlap excluded) | DER (overlap included) |
+| --- | ---: | ---: |
+| sample-02 | 5.24% | 12.57% |
+| sample-03 | 6.03% | 8.77% |
+| sample-04 | 5.82% | 18.12% |
+| sample-05 | 5.47% | 13.35% |
+| sample-06 | 3.35% | 8.12% |
+| sample-07 | 9.70% | 19.61% |
+| sample-08 | 5.11% | 11.71% |
+| sample-09 | 4.95% | 6.24% |
+| sample-10 | 3.70% | 7.75% |
+| sample-11 | 16.23% | 17.45% |
+| sample-12 | 7.62% | 8.32% |
+| sample-13 | 1.51% | 1.35% |
+| sample-14 | 0.73% | 0.89% |
+| sample-15 | 1.10% | 1.20% |
+| sample-16 | 0.79% | 0.84% |
+| sample-17 | 2.22% | 2.45% |
+| sample-18 | 0.59% | 0.88% |
+| sample-19 | 2.06% | 2.07% |
+| sample-20 | 0.89% | 1.14% |
+
+This is promising local quality and resource evidence, but it does not clear D1 or authorize D3–D5. NVIDIA's model card lists AliMeeting in its training data and does not establish the exact overlap between its training sessions and this Test split; until that provenance is audited, the 19-session scores cannot be called an independent held-out result. The model also supports at most four speakers, is primarily English with an explicit non-English degradation caveat, and was not evaluated here on one-speaker or code-switch meetings. A 120-minute single-file run, cancellation behavior, packaged-size/load test, speaker-name quality review, and distribution-license review remain open. Keep the model local and unbundled. D1 remains NO-GO pending those gates; the previously screened sherpa and MOSS candidates remain rejected for their own measured quality/runtime failures.

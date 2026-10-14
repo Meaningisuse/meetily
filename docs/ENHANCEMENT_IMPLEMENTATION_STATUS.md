@@ -102,4 +102,7 @@ P4候选后续验证：在临时目录构建 MIT moss-transcribe.cpp（source `1
 
 下一个候选为 NVIDIA Nemotron 3 Diarization：官方 NeMo-Speech.cpp v0.2.0 的 `metal-diar` 配置在 Apple Silicon 本机成功构建独立 diarization C API（CPU/Accelerate/Metal），产物和源码仅位于任务临时目录；没有模型权重或 Meetily 代码集成。模型 index 固定的 Q8_0 权重为107,012,128字节、SHA-256 `08456d9e...7c3a1`；模型卡声明最多8人、chunked长音频、10毫秒输出，并报告AliMeeting Test Far DER 10.47%（上游分数，非本机复现）。权重使用OpenMDW-1.1条款，用户确认是否接受前未下载或推理。详见 [D1 candidate note](DIARIZATION_SPIKE_RESULTS.md)。D1现仍为NO-GO。
 
-补充筛选同一运行时支持的 Sortformer v2：模型最多4人、80毫秒输出步长，卡片提示主要面向英语并可能在非英语上退化；没有该v2在AliMeeting Test Far上的官方分数。该公开权重的模型卡声明下载即接受CC BY 4.0。arm64 `metal-diar` C ABI重复构建、分块输入/收尾/片段读取符号及Metal/CPU/BLAS链接检查通过，产物仅在任务临时目录；这是运行时/接口证据，不是模型推理或中文质量证据。用户对“仅本机公开AliMeeting评测、不打包发布”的CC BY授权仍待回复，权重未下载。D1仍NO-GO；D3–D5不进入。
+初筛（之后的授权和实际推理记录见下文）同一运行时支持的 Sortformer v2：模型最多4人、80毫秒输出步长，卡片提示主要面向英语并可能在非英语上退化；没有该v2在AliMeeting Test Far上的官方分数。该公开权重的模型卡声明下载即接受CC BY 4.0。arm64 `metal-diar` C ABI重复构建、分块输入/收尾/片段读取符号及Metal/CPU/BLAS链接检查通过，产物仅在任务临时目录；这是运行时/接口证据，不是模型推理或中文质量证据。当时用户对“仅本机公开AliMeeting评测、不打包发布”的CC BY授权仍待回复、权重未下载。D1仍NO-GO；D3–D5不进入。
+
+
+2026-10-14 Sortformer v2 本机公开集诊断补充：按用户授权，仅在 Apple M5 Metal 本地运行，未打包或发布模型。固定 NeMo-Speech.cpp v0.2.0 与 Q8_0 权重，19场/612.149分钟一次冻结批次完成，0失败；总耗时982.78秒（RTF 0.0268），峰值RSS 1,248,722,944字节。使用250ms collar和重叠外/内分别计分，19场微平均DER 4.03%/7.89%，宏平均4.37%/7.52%，19/19场主DER低于20%。评分器在sample-01的30秒裁片上与既有`run_probe.der`交叉核对一致。性能质量门槛初步达标，但NVIDIA模型卡包含AliMeeting训练数据，具体会议/拆分重叠未审计，因此不能称独立留出成绩；模型最多4人且以英语为主，单人/中英切换、120分钟单文件、取消、打包和分发许可仍未验收。D1仍NO-GO，D3–D5未启动。完整匿名聚合数据见`DIARIZATION_SPIKE_RESULTS.md`；所有音频、RTTM、权重与逐场输出均留在仓库外。
