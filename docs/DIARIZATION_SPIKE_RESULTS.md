@@ -29,8 +29,8 @@ These corpora could supply Mandarin multi-speaker research material under their 
 | Measure | Required | Result |
 | --- | --- | --- |
 | Authorized evaluation set | ≥10 samples, ≥90 minutes, 20% holdout | Public AliMeeting Test prepared privately: 20 samples / 646.591 minutes. No model-specific session-overlap audit or independent supplemental one-speaker/code-switch set yet. |
-| Main DER | ≤20%, 250 ms collar, overlap excluded | Not passed. First sample only: unsupervised threshold 0.5 → 78.24%; threshold 0.8 → 51.38%; oracle 4-speaker count → 17.08%. These are one-sample diagnostics, not a held-out-set score. |
-| Overlap DER | Report separately | First-sample diagnostics: 82.12% (0.5), 56.94% (0.8), 24.89% (oracle 4 speakers). No full-set score. |
+| Main DER | ≤20%, 250 ms collar, overlap excluded | Not passed. On the first 34.442-minute development sample, unsupervised thresholds 0.5 / 0.8 / 0.85 / 0.9 / 0.95 / 0.99 produced 78.24% / 51.38% / 33.21% / 32.56% / 29.44% / 28.68%. Oracle 4-speaker count produced 17.08%. These are single-sample development diagnostics, not a held-out-set score. |
+| Overlap DER | Report separately | First-sample diagnostics: 82.12% / 56.94% / 41.95% / 40.96% / 37.80% / 36.81% at thresholds 0.5 / 0.8 / 0.85 / 0.9 / 0.95 / 0.99; oracle 4 speakers: 24.89%. No full-set score. |
 | Long recording | 120 minutes | Not available |
 | RTF | ≤0.5 | First-sample CPU diagnostic: 0.075 for the default model pass; not a full-set performance result. |
 | Peak RSS | ≤2 GiB | Not measured |
@@ -39,7 +39,7 @@ These corpora could supply Mandarin multi-speaker research material under their 
 | Model-weight licensing | Confirm each artifact and notices | Candidate notices collected: sherpa-onnx segmentation archive includes MIT; 3D-Speaker ModelScope card declares Apache-2.0. Exact converted embedding artifact provenance/redistribution remains to be confirmed before app packaging. |
 | Transcription timing | Whisper/Parakeet true-time and Chinese-tail regression | Synthetic Chinese TTS CPU/Metal tests preserve canonical text. Public AliMeeting Test CPU probe with `ggml-tiny`: a 120-second clip and eight 30-second speech-rich clips all safely returned `Unavailable` (0/9 exact timing). A same-window `ggml-base` run also returned `Unavailable`; no timestamp-accuracy pass. |
 
-The Go gate remains NO-GO. The private public-data set is prepared, but its full session-overlap audit and minimum-size evaluation have not run; the first-sample clustering results exceed the quality threshold by a wide margin; and runtime, cancellation, packaging, and complete artifact-license evidence are missing. The oracle-speaker diagnostic suggests segmentation/embedding may merit further clustering work, but it is not an operational mode because the speaker count is not known in advance. Benchmark numbers from model cards or upstream demo WAVs cannot replace this project's held-out Chinese meeting evaluation.
+The Go gate remains NO-GO. The private public-data set is prepared, but its full session-overlap audit and minimum-size evaluation have not run; even the best tested unsupervised threshold on the first development meeting is 28.68% DER, above the 20% gate; and runtime, cancellation, packaging, and complete artifact-license evidence are missing. The oracle-speaker diagnostic suggests segmentation/embedding may merit further clustering work, but it is not an operational mode because the speaker count is not known in advance. Thresholds were explored on this development sample and must be frozen before any held-out evaluation. Benchmark numbers from model cards or upstream demo WAVs cannot replace this project's held-out Chinese meeting evaluation.
 
 ## Reproducibility artifacts
 
