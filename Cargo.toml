@@ -16,3 +16,15 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.32.0", features = ["full"] }
+
+# Package-specific optimization belongs to the workspace manifest. LTO cannot
+# be configured per package; keep the other packages' release policy unchanged.
+[profile.release.package.llama-helper]
+codegen-units = 1
+opt-level = "s"
+
+# Xcode 27 strip can produce misaligned LINKEDIT pools in proc-macro dylibs.
+# Keep build-time dependencies loadable; application release artifacts keep
+# their existing optimization/debug policy.
+[profile.release.build-override]
+strip = "none"

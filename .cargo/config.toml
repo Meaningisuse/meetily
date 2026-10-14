@@ -1,0 +1,5 @@
+[env]
+# llama-helper loads local GGUF files over stdio. Its bundled cpp-httplib
+# HTTPS support is unused and incompatible with OpenSSL 4 in the pinned llama.cpp.
+# Rust reqwest TLS (provider calls/model downloads) is unaffected.
+CMAKE_DISABLE_FIND_PACKAGE_OpenSSL = "TRUE"

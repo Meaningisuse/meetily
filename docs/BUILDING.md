@@ -2,12 +2,14 @@
 
 This guide explains source builds on each supported platform. Start with the build notes below, then use the platform instructions that match your machine.
 
+For the internal enhancement branch, follow [the verified enhancement baseline](ENHANCEMENT_BUILD_BASELINE.md) for exact tool versions, the shared check runner, and macOS prerequisites.
+
 ## Build Notes
 
 Install the committed frontend dependencies before building:
 
 ```bash
-npm install -g pnpm@9.15.9
+npm install -g pnpm@10.32.1
 cd frontend
 pnpm install --frozen-lockfile
 ```
@@ -317,7 +319,7 @@ The application will be built with Metal GPU acceleration automatically.
 
 - **Node.js:** Download and install from [nodejs.org](https://nodejs.org/).
 - **Rust:** Install from [rust-lang.org](https://www.rust-lang.org/tools/install).
-- **pnpm:** Install version 9.15.9 with `npm install -g pnpm@9.15.9`.
+- **pnpm:** Install version 10.32.1 with `npm install -g pnpm@10.32.1`.
 - **Visual Studio Build Tools:** Install the "Desktop development with C++" workload from the Visual Studio Installer.
 - **CMake:** Download and install from [cmake.org](https://cmake.org/download/).
 

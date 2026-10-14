@@ -15,15 +15,15 @@ A modern desktop application for recording, transcribing, and analyzing meetings
 ## Prerequisites
 
 ### For macOS:
-- Node.js (v18 or later)
+- Node.js (v24.14.0)
 - Rust (latest stable)
-- pnpm (v9.15.9)
+- pnpm (v10.32.1)
 - [Xcode Command Line Tools](https://developer.apple.com/download/all/?q=xcode)
 
 ### For Windows:
-- Node.js (v18 or later)
+- Node.js (v24.14.0)
 - Rust (latest stable)
-- pnpm (v9.15.9)
+- pnpm (v10.32.1)
 - Visual Studio Build Tools with C++ development tools
 - Windows 10 or later
 
@@ -56,7 +56,7 @@ Use `pnpm install --frozen-lockfile` to install the committed dependency set. Wh
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    
    # Install pnpm
-   npm install -g pnpm@9.15.9
+   npm install -g pnpm@10.32.1
    
    # Install Xcode Command Line Tools
    xcode-select --install
@@ -77,9 +77,9 @@ Use `pnpm install --frozen-lockfile` to install the committed dependency set. Wh
 ### For Windows:
 
 1. Install prerequisites:
-   - Install [Node.js](https://nodejs.org/) (v18 or later)
+   - Install [Node.js](https://nodejs.org/) (v24.14.0)
    - Install [Rust](https://www.rust-lang.org/tools/install)
-   - Install pnpm: `npm install -g pnpm@9.15.9`
+   - Install pnpm: `npm install -g pnpm@10.32.1`
    - Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with C++ development tools
 
 2. Clone the repository and navigate to the frontend directory:

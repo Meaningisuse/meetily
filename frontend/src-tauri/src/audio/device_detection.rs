@@ -407,7 +407,7 @@ pub fn calculate_buffer_timeout(
     let base = Duration::from_secs_f64(buffer_size as f64 / sample_rate as f64);
 
     // Add 2x headroom for jitter (Cap's strategy)
-    let with_headroom = base.mul_f32(2.0);
+    let with_headroom = base.saturating_mul(2);
 
     // Clamp to device-specific range
     clamp_duration(with_headroom, min_timeout, max_timeout)
@@ -439,10 +439,10 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_mic_detection() {
-        let kind = InputDeviceKind::detect("MacBook Pro Microphone", 0, 0);
-        // Should fall through to Unknown (no Bluetooth pattern, no buffer size)
-        assert_eq!(kind, InputDeviceKind::Unknown);
+    fn test_builtin_mic_name_fallback() {
+        // Native detection may find the real microphone on the test machine.
+        // Exercise only the fallback here so this test is hardware-independent.
+        assert_eq!(InputDeviceKind::detect_by_name("MacBook Pro Microphone"), None);
     }
 
     #[test]
