@@ -69,3 +69,11 @@ P0现场验收、P3、P4目前尚未完成。P1模板管理与P2导出均未开�
 新增独立 `automation-client` TypeScript 包，采用官方 MCP TypeScript Server SDK `@modelcontextprotocol/server` 2.3.1。CLI/MCP 都通过 app-data discovery 验证活动 loopback 实例，然后使用 macOS Keychain 中按 client ID 查找的凭据；一次性令牌不作为命令行参数。CLI 提供会议列表、搜索、转录分页、摘要与任务状态读取，stdout只输出JSON；MCP stdio注册相同五种只读工具，不提供shell、写入、录音或导出工具。新增 `docs/INTERNAL_AUTOMATION.md` 说明如何手工配置所选助手，不自动改动外部主机配置。
 
 验证：包锁文件安装、TypeScript编译和5项 Bun 测试通过；包括陈旧实例、loopback 地址约束、CLI退出码/凭据隔离，以及MCP stdio仅列出五项只读工具的协议测试。统一前端门禁测试包括该包的锁文件安装、编译和测试。实际连接某个助手的主机级操作尚未验收，需用户选择目标助手；测试未读取会议或既有Keychain项目。
+
+### P3 / A4：分权限幂等写入与录音控制
+
+新增摘要任务、普通任务取消、录音开始/停止接口，分别强制write与record scope，并要求Idempotency-Key。幂等记录按client+key隔离，绑定规范化请求哈希，保存有界响应24小时；相同请求重放返回原结果，不同请求体返回CONFLICT，处理中重放返回BUSY。摘要写入携带expected_revision，旧版本在调用provider前拒绝。读凭据不可调用写/录音路由，设置页允许为单独客户端创建只读、写入或录音凭据。
+
+桌面与API录音操作共享互斥状态；录音由应用统一生成session_id，停止时核对当前会话，旧session不能停止新会话。API不接收任意保存路径。幂等 action 完成但结果尚未持久化时，重试会返回BUSY以避免重复副作用；崩溃恢复/安全接管尚未实现，客户端需重新确认操作状态后使用新key。
+
+验证：新增幂等重复结果/不同请求体冲突、旧录音session保护与读scope拒绝写/录音回归。原生Rust全量302通过、0失败、3忽略；前端57通过、类型检查、Next生产构建、MCP客户端构建及5项客户端测试通过。没有在此门禁中测试真实麦克风/系统音、设备断开或撤销进行中的客户端。

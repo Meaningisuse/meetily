@@ -415,6 +415,22 @@ async fn read_scope_cannot_read_keys_audio_or_paths() {
             404
         );
     }
+    let summary_write = http
+        .post(format!("{}/summary-jobs", discovery.base_url))
+        .bearer_auth(&token.token)
+        .json(&serde_json::json!({"meeting_id":"bounded","expected_revision":0,"model":"builtin-ai","model_name":"local"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(summary_write.status(), 403);
+    let recording_write = http
+        .post(format!("{}/recordings/start", discovery.base_url))
+        .bearer_auth(&token.token)
+        .json(&serde_json::json!({"meeting_name":"test"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(recording_write.status(), 403);
     let reply = http
         .get(format!("{}/meetings?limit=999", discovery.base_url))
         .bearer_auth(&token.token)

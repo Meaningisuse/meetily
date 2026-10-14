@@ -434,6 +434,7 @@ pub async fn api_process_transcript<R: Runtime>(
     template_id: Option<String>,
     summary_language: Option<String>,
     _auth_token: Option<String>,
+    expected_revision: Option<i64>,
 ) -> Result<ProcessTranscriptResponse, String> {
     use futures_util::FutureExt;
     let m_id = meeting_id
@@ -448,6 +449,9 @@ pub async fn api_process_transcript<R: Runtime>(
         .snapshot(&m_id)
         .await
         .map_err(|e| e.to_string())?;
+    if expected_revision.is_some_and(|expected| expected != document.versions.revision) {
+        return Err("CONFLICT: Meeting content changed; reload before starting this job.".into());
+    }
     let text = document
         .transcript
         .iter()

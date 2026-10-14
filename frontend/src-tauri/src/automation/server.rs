@@ -1,3 +1,4 @@
+use super::types::ClientBrief;
 use super::{
     auth::ClientService,
     discovery,
@@ -5,13 +6,14 @@ use super::{
 };
 use crate::meeting::EnhancementError;
 use axum::{
-    extract::{Path, Request, State},
+    extract::{Extension, Path, Request, State},
     http::{StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
+use serde::Deserialize;
 use sqlx::SqlitePool;
 use std::{
     collections::HashMap,
@@ -22,6 +24,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tauri::Manager;
 use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 pub(crate) struct GatewayState {
@@ -31,6 +34,7 @@ pub(crate) struct GatewayState {
     pub enabled: Arc<AtomicBool>,
     pub rates: Arc<std::sync::Mutex<HashMap<String, (Instant, u32)>>>,
     pub reads: Arc<tokio::sync::Semaphore>,
+    pub app: Option<tauri::AppHandle>,
 }
 struct Running {
     discovery: Discovery,
@@ -45,6 +49,7 @@ pub struct AutomationServer {
     root: PathBuf,
     running: Arc<tokio::sync::Mutex<Option<Running>>>,
     preference: Arc<tokio::sync::Mutex<()>>,
+    app: Arc<tokio::sync::RwLock<Option<tauri::AppHandle>>>,
 }
 pub(crate) struct ApiError(pub EnhancementError);
 impl From<EnhancementError> for ApiError {
@@ -77,7 +82,11 @@ impl AutomationServer {
             root: app_data.join("automation"),
             running: Arc::new(tokio::sync::Mutex::new(None)),
             preference: Arc::new(tokio::sync::Mutex::new(())),
+            app: Arc::new(tokio::sync::RwLock::new(None)),
         }
+    }
+    pub async fn attach_app_handle(&self, app: tauri::AppHandle) {
+        *self.app.write().await = Some(app);
     }
     pub async fn restore_preference(&self) -> Result<(), EnhancementError> {
         let enabled: bool = sqlx::query_scalar("SELECT enabled FROM automation_config WHERE id=1")
@@ -177,6 +186,7 @@ impl AutomationServer {
             enabled: enabled.clone(),
             rates: Arc::new(std::sync::Mutex::new(HashMap::new())),
             reads: Arc::new(tokio::sync::Semaphore::new(4)),
+            app: self.app.read().await.clone(),
         };
         let routes = Router::new()
             .route("/health", get(health))
@@ -185,6 +195,10 @@ impl AutomationServer {
             .route("/meetings/{id}/transcript", get(get_transcript))
             .route("/meetings/{id}/summary", get(get_summary))
             .route("/jobs/{id}", get(get_job))
+            .route("/summary-jobs", axum::routing::post(create_summary_job))
+            .route("/jobs/{id}/cancel", axum::routing::post(cancel_job))
+            .route("/recordings/start", axum::routing::post(start_recording))
+            .route("/recordings/{id}/stop", axum::routing::post(stop_recording))
             .fallback(|| async { error("NOT_FOUND", "Unknown automation endpoint") });
         let router = Router::new()
             .nest("/api/internal/v1", routes)
@@ -336,6 +350,220 @@ async fn get_job(
             .job(&id)
             .await?,
     ))
+}
+#[derive(Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct SummaryJobRequest {
+    meeting_id: String,
+    expected_revision: i64,
+    model: String,
+    model_name: String,
+    custom_prompt: Option<String>,
+    template_id: Option<String>,
+    summary_language: Option<String>,
+}
+
+#[derive(Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingStartRequest {
+    meeting_name: Option<String>,
+    mic_device_name: Option<String>,
+    system_device_name: Option<String>,
+}
+
+fn command_error(message: String) -> ApiError {
+    if let Some((code, text)) = message.split_once(": ") {
+        if matches!(
+            code,
+            "CONFLICT" | "INVALID_ARGUMENT" | "INVALID_INPUT" | "NOT_FOUND" | "BUSY" | "NOT_READY"
+        ) {
+            return ApiError(EnhancementError::new(code, text));
+        }
+    }
+    ApiError(EnhancementError::new(
+        "IO_ERROR",
+        "The local operation could not be completed.",
+    ))
+}
+
+fn idempotency_key(headers: &axum::http::HeaderMap) -> Result<String, ApiError> {
+    headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            ApiError(EnhancementError::invalid(
+                "Idempotency-Key header is required.",
+            ))
+        })
+}
+
+async fn create_summary_job(
+    State(state): State<GatewayState>,
+    Extension(client): Extension<ClientBrief>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<SummaryJobRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if request.meeting_id.trim().is_empty()
+        || request.meeting_id.len() > 256
+        || request.model.len() > 100
+        || request.model_name.len() > 200
+        || request
+            .custom_prompt
+            .as_ref()
+            .is_some_and(|s| s.len() > 100_000)
+    {
+        return Err(ApiError(EnhancementError::invalid(
+            "Summary job fields exceed their limits.",
+        )));
+    }
+    let app = state.app.ok_or_else(|| {
+        ApiError(EnhancementError::new(
+            "NOT_READY",
+            "Desktop state is unavailable.",
+        ))
+    })?;
+    let key = idempotency_key(&headers)?;
+    let payload = serde_json::to_value(&request)
+        .map_err(|_| ApiError(EnhancementError::invalid("Invalid request body.")))?;
+    let response =
+        super::idempotency::run(&state.pool, &client.id, &key, &payload, || async move {
+            let app_state = app.try_state::<crate::state::AppState>().ok_or_else(|| {
+                EnhancementError::new("NOT_READY", "Desktop state is unavailable.")
+            })?;
+            crate::summary::commands::api_process_transcript(
+                app.clone(),
+                app_state,
+                String::new(),
+                request.model,
+                request.model_name,
+                Some(request.meeting_id),
+                None,
+                None,
+                request.custom_prompt,
+                request.template_id,
+                request.summary_language,
+                None,
+                Some(request.expected_revision),
+            )
+            .await
+            .map_err(|error| command_error(error).0)
+        })
+        .await?;
+    Ok(Json(serde_json::to_value(response).unwrap_or_default()))
+}
+
+async fn cancel_job(
+    State(state): State<GatewayState>,
+    Extension(client): Extension<ClientBrief>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app = state.app.ok_or_else(|| {
+        ApiError(EnhancementError::new(
+            "NOT_READY",
+            "Desktop state is unavailable.",
+        ))
+    })?;
+    let key = idempotency_key(&headers)?;
+    let payload = serde_json::json!({"job_id":id,"operation":"cancel"});
+    let response =
+        super::idempotency::run(&state.pool, &client.id, &key, &payload, || async move {
+            let app_state = app.try_state::<crate::state::AppState>().ok_or_else(|| {
+                EnhancementError::new("NOT_READY", "Desktop state is unavailable.")
+            })?;
+            app_state.jobs.cancel(&id).await
+        })
+        .await?;
+    Ok(Json(serde_json::to_value(response).unwrap_or_default()))
+}
+
+async fn start_recording(
+    State(state): State<GatewayState>,
+    Extension(client): Extension<ClientBrief>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<RecordingStartRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if request.meeting_name.as_ref().is_some_and(|s| {
+        s.trim().is_empty() || s.chars().count() > 200 || s.chars().any(char::is_control)
+    }) {
+        return Err(ApiError(EnhancementError::invalid(
+            "meeting_name must be at most 200 visible characters.",
+        )));
+    }
+    for device in [&request.mic_device_name, &request.system_device_name]
+        .into_iter()
+        .flatten()
+    {
+        if device.chars().count() > 200 || device.chars().any(char::is_control) {
+            return Err(ApiError(EnhancementError::invalid(
+                "Device name exceeds its limit.",
+            )));
+        }
+    }
+    let app = state.app.ok_or_else(|| {
+        ApiError(EnhancementError::new(
+            "NOT_READY",
+            "Desktop state is unavailable.",
+        ))
+    })?;
+    let key = idempotency_key(&headers)?;
+    let payload = serde_json::to_value(&request)
+        .map_err(|_| ApiError(EnhancementError::invalid("Invalid request body.")))?;
+    let response =
+        super::idempotency::run(&state.pool, &client.id, &key, &payload, || async move {
+            let session_id = crate::audio::recording_commands::automation_start_recording(
+                app,
+                request.mic_device_name,
+                request.system_device_name,
+                request.meeting_name,
+            )
+            .await
+            .map_err(|e| {
+                if e.starts_with("CONFLICT:") {
+                    EnhancementError::new("CONFLICT", e.trim_start_matches("CONFLICT: "))
+                } else {
+                    EnhancementError::new("IO_ERROR", "Recording could not be started.")
+                }
+            })?;
+            Ok(serde_json::json!({"session_id":session_id,"status":"recording"}))
+        })
+        .await?;
+    Ok(Json(response))
+}
+
+async fn stop_recording(
+    State(state): State<GatewayState>,
+    Extension(client): Extension<ClientBrief>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app = state.app.ok_or_else(|| {
+        ApiError(EnhancementError::new(
+            "NOT_READY",
+            "Desktop state is unavailable.",
+        ))
+    })?;
+    let key = idempotency_key(&headers)?;
+    let payload = serde_json::json!({"session_id":id,"operation":"stop"});
+    let response =
+        super::idempotency::run(&state.pool, &client.id, &key, &payload, || async move {
+            crate::audio::recording_commands::automation_stop_recording(app, &id)
+                .await
+                .map_err(|e| {
+                    if e.starts_with("CONFLICT:") {
+                        EnhancementError::new("CONFLICT", e.trim_start_matches("CONFLICT: "))
+                    } else {
+                        EnhancementError::new(
+                            "IO_ERROR",
+                            "Recording could not be stopped or saved.",
+                        )
+                    }
+                })?;
+            Ok(serde_json::json!({"session_id":id,"status":"stopped"}))
+        })
+        .await?;
+    Ok(Json(response))
 }
 async fn guard(State(state): State<GatewayState>, mut request: Request, next: Next) -> Response {
     if !state.enabled.load(Ordering::SeqCst) {

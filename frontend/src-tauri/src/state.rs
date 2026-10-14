@@ -6,7 +6,7 @@ pub struct AppState {
     pub automation: crate::automation::server::AutomationServer,
 }
 impl AppState {
-    pub async fn new(db_manager: DatabaseManager) -> Result<Self, String> {
+    pub async fn new(db_manager: DatabaseManager, app: tauri::AppHandle) -> Result<Self, String> {
         let jobs = JobService::new(db_manager.pool().clone());
         jobs.recover_interrupted()
             .await
@@ -27,6 +27,7 @@ impl AppState {
             clients,
             app_data,
         );
+        automation.attach_app_handle(app).await;
         if let Err(error) = automation.restore_preference().await {
             log::error!("Automation remained disabled: {error}");
         }

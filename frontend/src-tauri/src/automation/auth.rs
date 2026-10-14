@@ -80,10 +80,10 @@ impl ClientService {
         if name.trim().is_empty()
             || name.chars().count() > 100
             || name.chars().any(char::is_control)
-            || scopes != vec![Scope::Read]
+            || scopes.len() != 1
         {
             return Err(EnhancementError::invalid(
-                "Provide a client name and the currently supported read scope.",
+                "Provide a client name and exactly one supported permission scope.",
             ));
         }
         let now = chrono::Utc::now().timestamp();
