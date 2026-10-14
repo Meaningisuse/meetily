@@ -39,3 +39,11 @@ The Go gate therefore fails on missing authorized labels, unavailable runtime/mo
 The probe was smoke-tested with a generated 10-second silent WAV, synthetic RTTM, placeholder model files, and a fake CLI that returns matching turns. This checks argument wiring, report serialization, and DER plumbing only; it is not diarization, model, performance, cancellation, or quality evidence.
 
 To change this decision, prepare and authorize the minimum set described in [`frontend/src-tauri/tests/fixtures/diarization/README.md`](../frontend/src-tauri/tests/fixtures/diarization/README.md), make model/runtime versions reproducible, verify each weight's terms and packaging rights, and run the probe on the holdout plus a separate 120-minute load sample. Until then, D3–D5 remain paused by the plan's explicit gate.
+
+## D2 timing status (2026-10-14)
+
+**Status: foundation implemented; provider-level precise timing remains unverified and is not enabled.** The new `audio::time_map` helper maps half-open intervals from packed 16 kHz samples to original source sample spans. It splits output at source discontinuities and rejects unmapped or overlapping packed ranges. Absolute sample-rate conversion uses one rational operation to avoid per-chunk rounding drift.
+
+The focused Rust tests pass for a VAD gap (packed 1–2 s maps to source 10–11 s), an interval crossing that gap (returned as two spans), 44.1/48 kHz conversion over 120 minutes, and invalid/unmapped ranges. These tests verify mapping arithmetic only.
+
+Existing transcription providers still return plain text. Whisper currently disables its no-timestamp optimization because that path has previously skipped valid chunks; Parakeet exposes only text. Import and retranscription retain VAD segment start/end positions, which are approximate segment bounds rather than provider word timings. No authorized Chinese regression set or local model is available to prove a timestamp-enabled Whisper path preserves Chinese tail text or validate timing on real audio. This change adds no provider timestamp behavior, transcript precision field, schema migration, or exact-timing claim. D2 remains incomplete pending a real-model regression fixture and end-to-end timing readback.
