@@ -75,6 +75,8 @@ struct SummaryCacheSource {
     top_p: Option<f32>,
     #[serde(default)]
     source_versions: Option<crate::meeting::SourceVersions>,
+    #[serde(default)]
+    budget_algorithm_version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -125,6 +127,7 @@ fn build_summary_cache_source(
         temperature,
         top_p,
         source_versions: None,
+        budget_algorithm_version: 1,
     }
 }
 
@@ -505,8 +508,8 @@ impl SummaryService {
             };
             match metadata {
                 Ok(metadata) => {
-                    // Reserve 300 tokens for prompt overhead
-                    let optimal = metadata.context_size.saturating_sub(300);
+                    // Processor subtracts the actual prompt and output budgets.
+                    let optimal = metadata.context_size.min(32768);
                     info!(
                         "✓ Using dynamic context for {}: {} tokens (chunk size: {})",
                         model_name, metadata.context_size, optimal
@@ -515,10 +518,10 @@ impl SummaryService {
                 }
                 Err(e) => {
                     warn!(
-                        "Failed to fetch context for {}: {}. Using default 4000",
+                        "Failed to fetch context for {}: {}. Using conservative default 4096",
                         model_name, e
                     );
-                    4000 // Fallback to safe default
+                    4096 // Metadata unavailable; use a conservative explicit assumption.
                 }
             }
         } else if provider == LLMProvider::BuiltInAI {
@@ -529,8 +532,8 @@ impl SummaryService {
 
             match model {
                 Ok(model_def) => {
-                    // Reserve 300 tokens for prompt overhead
-                    let optimal = model_def.context_size.saturating_sub(300) as usize;
+                    // Processor subtracts the actual prompt and output budgets.
+                    let optimal = model_def.context_size as usize;
                     info!(
                         "✓ Using BuiltInAI context size: {} tokens (chunk size: {})",
                         model_def.context_size, optimal
@@ -539,12 +542,13 @@ impl SummaryService {
                 }
                 Err(e) => {
                     warn!("{}, using default 2048", e);
-                    1748 // 2048 - 300 for overhead
+                    2048 // Unknown local model will fail explicitly if the template cannot fit.
                 }
             }
         } else {
-            // Cloud providers (OpenAI, Claude, Groq, CustomOpenAI) handle large contexts automatically
-            100000 // Effectively unlimited for single-pass processing
+            // Arbitrary BYOK model contexts are not inferred from the provider.
+            // Use a conservative assumption, never an unlimited single pass.
+            4096
         };
 
         // Get app data directory for BuiltInAI provider

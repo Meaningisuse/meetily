@@ -12,6 +12,7 @@ export interface MeetingMetadata {
   lastUpdated: number;        // Unix timestamp (ms)
   transcriptCount: number;    // Number of transcript segments
   savedToSQLite: boolean;     // Flag: saved to backend DB
+  audioAvailable?: boolean;   // Recovery preview only; preserve durable folder even without audio
   folderPath?: string;        // Path to recording folder
 }
 

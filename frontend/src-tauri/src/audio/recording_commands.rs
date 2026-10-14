@@ -398,6 +398,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     let app_for_error = app.clone();
     manager.set_error_callback(move |error| {
         let _ = app_for_error.emit("recording-error", error.user_message());
+        if !error.is_recoverable() {let _=app_for_error.emit("recording-fatal-error",serde_json::json!({"message":error.user_message()}));}
     });
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
@@ -439,6 +440,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Store listener ID for cleanup during stop_recording to ensure microphone is released
     {
         use tauri::Listener;
+        let stop_history=RECORDING_MANAGER.lock().unwrap().as_ref().map(|manager|manager.history_handle());
         let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
             // Parse the transcript update from the event payload
             if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
@@ -458,6 +460,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
                 if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
                     if let Some(manager) = manager_guard.as_ref() {
                         manager.add_transcript_segment(segment);
+                    } else if let Some(history)=&stop_history {
+                        if let Ok(mut history)=history.lock(){
+                            if let Some(existing)=history.iter_mut().find(|s|s.sequence_id==segment.sequence_id){*existing=segment;}else{history.push(segment);}
+                        }
                     }
                 }
             }
@@ -585,6 +591,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     let app_for_error = app.clone();
     manager.set_error_callback(move |error| {
         let _ = app_for_error.emit("recording-error", error.user_message());
+        if !error.is_recoverable() {let _=app_for_error.emit("recording-fatal-error",serde_json::json!({"message":error.user_message()}));}
     });
 
     // Start recording with specified devices and auto_save setting
@@ -626,6 +633,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Store listener ID for cleanup during stop_recording to ensure microphone is released
     {
         use tauri::Listener;
+        let stop_history=RECORDING_MANAGER.lock().unwrap().as_ref().map(|manager|manager.history_handle());
         let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
             // Parse the transcript update from the event payload
             if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
@@ -645,6 +653,10 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
                     if let Some(manager) = manager_guard.as_ref() {
                         manager.add_transcript_segment(segment);
+                    } else if let Some(history)=&stop_history {
+                        if let Ok(mut history)=history.lock(){
+                            if let Some(existing)=history.iter_mut().find(|s|s.sequence_id==segment.sequence_id){*existing=segment;}else{history.push(segment);}
+                        }
                     }
                 }
             }
@@ -724,25 +736,8 @@ pub async fn stop_recording<R: Runtime>(
 
     let (stop_result, manager_for_cleanup) = stop_result;
 
-    match stop_result {
-        Ok(_) => {
-            info!("✅ Audio streams stopped successfully - no more chunks will be created");
-        }
-        Err(e) => {
-            error!("❌ Failed to stop audio streams: {}", e);
-            return Err(format!("Failed to stop audio streams: {}", e)); // _stopping_guard clears on return
-        }
-    }
-
-    // Step 1.5: Clean up transcript listener to release microphone
-    // Unlisten transcript-update event to prevent lingering references
-    {
-        use tauri::Listener;
-        if let Some(listener_id) = TRANSCRIPT_LISTENER_ID.lock().unwrap().take() {
-            app.unlisten(listener_id);
-            info!("✅ Transcript-update listener removed");
-        }
-    }
+    let stop_error=stop_result.err().map(|error|format!("Audio capture ended with an error: {error}"));
+    if let Some(error)=&stop_error {log::error!("{error}; draining workers and preserving remaining audio before returning.");}
 
     // Step 2: Signal transcription workers to finish processing ALL queued chunks
     let _ = app.emit(
@@ -760,8 +755,8 @@ pub async fn stop_recording<R: Runtime>(
         global_task.take()
     };
 
-    if let Some(task_handle) = transcription_task {
-        info!("⏳ Waiting for ALL transcription chunks to be processed (no timeout - preserving every chunk)");
+    if let Some(mut task_handle) = transcription_task {
+        info!("⏳ Waiting for bounded transcription work and durable backlog");
 
         // Enhanced progress monitoring during shutdown
         let progress_app = app.clone();
@@ -789,18 +784,20 @@ pub async fn stop_recording<R: Runtime>(
         // Wait up to 10 minutes for transcription completion to prevent indefinite hangs
         match tokio::time::timeout(
             tokio::time::Duration::from_secs(600), // 10 minutes max
-            task_handle
+            &mut task_handle
         ).await {
             Ok(Ok(())) => {
-                info!("✅ ALL transcription chunks processed successfully - no data lost");
+                info!("✅ Transcription worker joined; final saved-input status will be verified");
             }
             Ok(Err(e)) => {
                 warn!("⚠️ Transcription task completed with error: {:?}", e);
                 // Continue anyway - the worker may have processed most chunks
             }
             Err(_) => {
-                warn!("⏱️ Transcription timeout (10 minutes) reached, continuing shutdown to prevent indefinite hang");
-                // Continue shutdown even on timeout - better to lose some chunks than hang forever
+                warn!("Transcription reached the stop budget; retaining unprocessed saved inputs and waiting for the active inference to finish safely.");
+                crate::audio::transcription::worker::cancel_pending_transcription();
+                if let Err(error)=task_handle.await {log::error!("Transcription worker join failed: {error}");}
+                let _=app.emit("transcription-warning","Remaining inputs were retained for retry; transcript is incomplete.");
             }
         }
 
@@ -808,6 +805,16 @@ pub async fn stop_recording<R: Runtime>(
         progress_task.abort();
     } else {
         info!("ℹ️ No transcription task found to wait for");
+    }
+
+    // Step 1.5: Clean up transcript listener to release microphone
+    // Unlisten transcript-update event to prevent lingering references
+    {
+        use tauri::Listener;
+        if let Some(listener_id) = TRANSCRIPT_LISTENER_ID.lock().unwrap().take() {
+            app.unlisten(listener_id);
+            info!("✅ Transcript-update listener removed");
+        }
     }
 
     // Step 3: Now safely unload Whisper model after ALL chunks are processed
@@ -1032,11 +1039,14 @@ pub async fn stop_recording<R: Runtime>(
                     "⚠️ Error during recording cleanup (transcripts preserved): {}",
                     e
                 );
-                // Don't fail shutdown - transcripts are already preserved
+                IS_RECORDING.store(false,Ordering::SeqCst);
+                crate::tray::update_tray_menu(&app);
+                return Err(format!("Recording audio could not be saved; recovery files retained: {e}"));
             }
             Err(_) => {
-                warn!("⏱️ File I/O timeout (5 minutes) reached during save, continuing shutdown");
-                // Don't fail shutdown - transcripts are already preserved
+                IS_RECORDING.store(false,Ordering::SeqCst);
+                crate::tray::update_tray_menu(&app);
+                return Err("Recording save timed out; recovery files retained. Audio persistence was not confirmed.".into());
             }
         }
 
@@ -1093,7 +1103,8 @@ pub async fn stop_recording<R: Runtime>(
     // Update tray menu to reflect stopped state
     crate::tray::update_tray_menu(&app);
 
-    info!("🎉 Recording stopped successfully with ZERO transcript chunks lost");
+    info!("Recording stopped; durable catch-up files record any incomplete transcript intervals.");
+    if let Some(error)=stop_error {return Err(error);}
     Ok(())
 }
 

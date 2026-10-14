@@ -711,6 +711,7 @@ pub fn run() {
             audio::recording_commands::get_active_audio_output,
             // Audio recovery commands (for transcript recovery feature)
             audio::incremental_saver::recover_audio_from_checkpoints,
+            audio::catchup::recover_transcription_backlog,
             audio::incremental_saver::cleanup_checkpoints,
             audio::incremental_saver::has_audio_checkpoints,
             console_utils::show_console,

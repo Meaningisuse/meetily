@@ -1,3 +1,4 @@
+use super::work_queue::AudioWorkSender;
 use std::sync::Arc;
 use std::collections::VecDeque;
 use tokio::sync::mpsc;
@@ -211,7 +212,7 @@ pub struct AudioCapture {
     channels: u16,
     chunk_counter: Arc<std::sync::atomic::AtomicU64>,
     device_type: DeviceType,
-    recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
+    recording_sender: Option<mpsc::Sender<AudioChunk>>,
     needs_resampling: bool,  // Flag if resampling is required
     // CRITICAL FIX: Persistent resampler to preserve energy across chunks
     resampler: Arc<std::sync::Mutex<Option<SincFixedIn<f32>>>>,
@@ -233,7 +234,7 @@ impl AudioCapture {
         sample_rate: u32,
         channels: u16,
         device_type: DeviceType,
-        recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
+        recording_sender: Option<mpsc::Sender<AudioChunk>>,
     ) -> Self {
         // CRITICAL FIX: Detect if resampling is needed
         // Pipeline expects 48kHz, but Bluetooth devices often report 8kHz, 16kHz, or 44.1kHz
@@ -691,8 +692,8 @@ impl AudioCapture {
 /// VAD-driven audio processing pipeline
 /// Uses Voice Activity Detection to segment speech in real-time and send only speech to Whisper
 pub struct AudioPipeline {
-    receiver: mpsc::UnboundedReceiver<AudioChunk>,
-    transcription_sender: mpsc::UnboundedSender<AudioChunk>,
+    receiver: mpsc::Receiver<AudioChunk>,
+    transcription_sender: AudioWorkSender,
     state: Arc<RecordingState>,
     vad_processor: ContinuousVadProcessor,
     sample_rate: u32,
@@ -706,13 +707,13 @@ pub struct AudioPipeline {
     ring_buffer: AudioMixerRingBuffer,
     mixer: ProfessionalAudioMixer,
     // Recording sender for pre-mixed audio
-    recording_sender_for_mixed: Option<mpsc::UnboundedSender<AudioChunk>>,
+    recording_sender_for_mixed: Option<mpsc::Sender<AudioChunk>>,
 }
 
 impl AudioPipeline {
     pub fn new(
-        receiver: mpsc::UnboundedReceiver<AudioChunk>,
-        transcription_sender: mpsc::UnboundedSender<AudioChunk>,
+        receiver: mpsc::Receiver<AudioChunk>,
+        transcription_sender: AudioWorkSender,
         state: Arc<RecordingState>,
         target_chunk_duration_ms: u32,
         sample_rate: u32,
@@ -856,6 +857,18 @@ impl AudioPipeline {
                             // Previous 2x gain was causing excessive limiting/distortion
                             let mixed_with_gain = mixed_clean;
 
+                            // Save original mixed audio before any transcription/spool operation can fail.
+                            if let Some(ref sender) = self.recording_sender_for_mixed {
+                                let recording_chunk = AudioChunk {
+                                    data: mixed_with_gain.clone(),
+                                    sample_rate: self.sample_rate,
+                                    timestamp: chunk.timestamp,
+                                    chunk_id: self.chunk_id_counter,
+                                    device_type: DeviceType::Microphone,  // Mixed audio
+                                };
+                                if let Err(error)=sender.send(recording_chunk).await {self.state.report_error(AudioError::StorageFailed);return Err(anyhow::anyhow!("Audio saver stopped: {error}"));}
+                            }
+
                             // STEP 3: Send mixed audio for transcription (VAD + Whisper)
                             match self.vad_processor.process_audio(&mixed_with_gain) {
                                 Ok(speech_segments) => {
@@ -875,7 +888,8 @@ impl AudioPipeline {
                                             };
 
                                             if let Err(e) = self.transcription_sender.send(transcription_chunk) {
-                                                warn!("Failed to send VAD segment: {}", e);
+                                                self.state.report_error(if self.transcription_sender.has_recovery_audio(){AudioError::StorageFailed}else{AudioError::BacklogWithoutAudio});
+                                                return Err(e);
                                             } else {
                                                 self.chunk_id_counter += 1;
                                             }
@@ -890,17 +904,7 @@ impl AudioPipeline {
                                 }
                             }
 
-                            // STEP 4: Send mixed audio for recording (WAV file)
-                            if let Some(ref sender) = self.recording_sender_for_mixed {
-                                let recording_chunk = AudioChunk {
-                                    data: mixed_with_gain.clone(),
-                                    sample_rate: self.sample_rate,
-                                    timestamp: chunk.timestamp,
-                                    chunk_id: self.chunk_id_counter,
-                                    device_type: DeviceType::Microphone,  // Mixed audio
-                                };
-                                let _ = sender.send(recording_chunk);
-                            }
+
                         }
                     }
                 }
@@ -945,7 +949,8 @@ impl AudioPipeline {
                         };
 
                         if let Err(e) = self.transcription_sender.send(transcription_chunk) {
-                            warn!("Failed to send final VAD segment: {}", e);
+                            self.state.report_error(if self.transcription_sender.has_recovery_audio(){AudioError::StorageFailed}else{AudioError::BacklogWithoutAudio});
+                            return Err(e);
                         } else {
                             self.chunk_id_counter += 1;
                         }
@@ -968,7 +973,7 @@ impl AudioPipeline {
 /// Simple audio pipeline manager
 pub struct AudioPipelineManager {
     pipeline_handle: Option<JoinHandle<Result<()>>>,
-    audio_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
+    audio_sender: Option<mpsc::Sender<AudioChunk>>,
 }
 
 impl AudioPipelineManager {
@@ -983,10 +988,10 @@ impl AudioPipelineManager {
     pub fn start(
         &mut self,
         state: Arc<RecordingState>,
-        transcription_sender: mpsc::UnboundedSender<AudioChunk>,
+        transcription_sender: AudioWorkSender,
         target_chunk_duration_ms: u32,
         sample_rate: u32,
-        recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
+        recording_sender: Option<mpsc::Sender<AudioChunk>>,
         mic_device_name: String,
         mic_device_kind: super::device_detection::InputDeviceKind,
         system_device_name: String,
@@ -998,7 +1003,7 @@ impl AudioPipelineManager {
         info!("   System Audio: '{}' ({:?})", system_device_name, system_device_kind);
 
         // Create audio processing channel
-        let (audio_sender, audio_receiver) = mpsc::unbounded_channel::<AudioChunk>();
+        let (audio_sender, audio_receiver) = mpsc::channel::<AudioChunk>(256);
 
 
         // Create and start pipeline with device information for adaptive mixing
@@ -1065,7 +1070,7 @@ impl AudioPipelineManager {
                 device_type: super::recording_state::DeviceType::Microphone,
             };
 
-            if let Err(e) = sender.send(flush_chunk) {
+            if let Err(e) = sender.send(flush_chunk).await {
                 warn!("Failed to send flush signal: {}", e);
             } else {
                 info!("📤 Sent flush signal to pipeline");
@@ -1084,7 +1089,7 @@ impl AudioPipelineManager {
                         chunk_id: u64::MAX - (i as u64),
                         device_type: super::recording_state::DeviceType::Microphone,
                     };
-                    let _ = sender.send(additional_flush);
+                    let _ = sender.send(additional_flush).await;
                 }
 
                 info!("📤 Sent additional flush signals for reliability");

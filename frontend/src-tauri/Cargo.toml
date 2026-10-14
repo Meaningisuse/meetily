@@ -63,6 +63,7 @@ sha2 = "0.10"
 
 
 [dependencies]
+sha2 = "=0.10.9"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0"
@@ -101,7 +102,7 @@ nnnoiseless = "0.5"
 # NOTE: whisper-rs is declared in platform-specific sections below (macOS/Windows/Linux)
 # to ensure correct GPU features are enabled per platform
 futures-util = "0.3"
-silero_rs = { git = "https://github.com/emotechlab/silero-rs", rev = "26a6460", package = "silero" }
+silero_rs = { path = "../../vendor/silero", package = "silero" }
 
 # Parakeet (ONNX-based fast transcription) dependencies
 ort = { version = "2.0.0-rc.10" }  # ONNX Runtime for Parakeet models

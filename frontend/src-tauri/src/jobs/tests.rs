@@ -295,3 +295,30 @@ async fn restart_projects_pending_summary_and_preserves_result() {
     assert!(row.1.contains("Saved summary"));
     assert_eq!(restarted.get(&job.id).await.unwrap().status, "interrupted");
 }
+
+#[tokio::test]
+async fn saved_audio_recovery_uses_the_shared_heavy_slot() {
+    let pool = crate::meeting::tests::pool().await;
+    crate::meeting::tests::seed(&pool, "recovery").await;
+    let jobs = super::JobService::new(pool);
+    let permit = jobs.try_audio_recovery_slot().unwrap();
+    assert!(jobs.try_audio_recovery_slot().is_err());
+    let queued = jobs
+        .enqueue(
+            super::JobKind::Summary,
+            "recovery",
+            0,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), jobs.start(&queued.id))
+            .await
+            .is_err()
+    );
+    drop(permit);
+    let lease = jobs.start(&queued.id).await.unwrap();
+    assert!(jobs.try_audio_recovery_slot().is_err());
+    drop(lease);
+}

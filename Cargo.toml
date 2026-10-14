@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/silero"]
 members = [
     "frontend/src-tauri",
     "llama-helper"

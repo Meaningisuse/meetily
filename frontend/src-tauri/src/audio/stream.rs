@@ -43,7 +43,7 @@ impl AudioStream {
         device: Arc<AudioDevice>,
         state: Arc<RecordingState>,
         device_type: DeviceType,
-        recording_sender: Option<mpsc::UnboundedSender<super::recording_state::AudioChunk>>,
+        recording_sender: Option<mpsc::Sender<super::recording_state::AudioChunk>>,
     ) -> Result<Self> {
         // Get current backend from global config
         let backend_type = get_current_backend();
@@ -55,7 +55,7 @@ impl AudioStream {
         device: Arc<AudioDevice>,
         state: Arc<RecordingState>,
         device_type: DeviceType,
-        recording_sender: Option<mpsc::UnboundedSender<super::recording_state::AudioChunk>>,
+        recording_sender: Option<mpsc::Sender<super::recording_state::AudioChunk>>,
         backend_type: AudioCaptureBackend,
     ) -> Result<Self> {
         info!("🎵 Stream: Creating audio stream for device: {} with backend: {:?}, device_type: {:?}",
@@ -107,7 +107,7 @@ impl AudioStream {
         device: Arc<AudioDevice>,
         state: Arc<RecordingState>,
         device_type: DeviceType,
-        recording_sender: Option<mpsc::UnboundedSender<super::recording_state::AudioChunk>>,
+        recording_sender: Option<mpsc::Sender<super::recording_state::AudioChunk>>,
     ) -> Result<Self> {
         info!("Creating CPAL stream for device: {}", device.name);
 
@@ -146,7 +146,7 @@ impl AudioStream {
         device: Arc<AudioDevice>,
         state: Arc<RecordingState>,
         device_type: DeviceType,
-        recording_sender: Option<mpsc::UnboundedSender<super::recording_state::AudioChunk>>,
+        recording_sender: Option<mpsc::Sender<super::recording_state::AudioChunk>>,
     ) -> Result<Self> {
         info!("🔊 Stream: Creating Core Audio stream for device: {}", device.name);
 
@@ -376,7 +376,7 @@ impl AudioStreamManager {
         &mut self,
         microphone_device: Option<Arc<AudioDevice>>,
         system_device: Option<Arc<AudioDevice>>,
-        recording_sender: Option<mpsc::UnboundedSender<super::recording_state::AudioChunk>>,
+        recording_sender: Option<mpsc::Sender<super::recording_state::AudioChunk>>,
     ) -> Result<()> {
         use super::capture::get_current_backend;
         let backend = get_current_backend();

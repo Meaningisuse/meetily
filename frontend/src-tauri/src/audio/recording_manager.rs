@@ -230,16 +230,19 @@ impl RecordingManager {
         microphone_device: Option<Arc<AudioDevice>>,
         system_device: Option<Arc<AudioDevice>>,
         auto_save: bool,
-    ) -> std::result::Result<mpsc::UnboundedReceiver<AudioChunk>, RecordingStartError> {
+    ) -> std::result::Result<super::work_queue::AudioWorkReceiver, RecordingStartError> {
         info!("Starting recording manager (auto_save: {})", auto_save);
 
         // Set up transcription channel
-        let (transcription_sender, transcription_receiver) = mpsc::unbounded_channel::<AudioChunk>();
-        let (recording_sender, recording_receiver) = mpsc::unbounded_channel::<AudioChunk>();
+        let (recording_sender, recording_receiver) = mpsc::channel::<AudioChunk>(64);
 
         // Start recording state first
         self.state.start_recording()?;
 
+        if let Err(error)=self.recording_saver.start_accumulation(auto_save,recording_receiver,self.state.clone()){self.state.stop_recording();return Err(RecordingStartError::TranscriptionRuntime(error));}
+        let recovery_folder=if auto_save {self.recording_saver.get_meeting_folder().cloned()}else{None};
+        if auto_save && recovery_folder.is_none(){self.state.stop_recording();return Err(RecordingStartError::TranscriptionRuntime(anyhow::anyhow!("Audio saving folder could not be initialized")));}
+        let (transcription_sender,transcription_receiver)=super::work_queue::audio_work_queue(8,recovery_folder).map_err(RecordingStartError::TranscriptionRuntime)?;
         // Get device information for adaptive mixing
         // The pipeline uses device kind (Bluetooth vs Wired) to apply adaptive buffering:
         // - Bluetooth: Larger buffers (80-200ms) to handle jitter
@@ -276,7 +279,6 @@ impl RecordingManager {
             return Err(RecordingStartError::TranscriptionRuntime(error));
         }
 
-        self.recording_saver.start_accumulation(auto_save, recording_receiver);
         self.recording_saver.set_device_info(
             microphone_device.as_ref().map(|d| d.name.clone()),
             system_device.as_ref().map(|d| d.name.clone())
@@ -287,7 +289,11 @@ impl RecordingManager {
 
         // Start audio streams - they send RAW unmixed chunks to pipeline for mixing
         // Pipeline handles mixing and distribution to both recording and transcription
-        self.stream_manager.start_streams(microphone_device.clone(), system_device.clone(), None).await?;
+        if let Err(error)=self.stream_manager.start_streams(microphone_device.clone(),system_device.clone(),None).await {
+            self.state.stop_recording();let _=self.stream_manager.stop_streams();let _=self.pipeline_manager.stop().await;
+            return Err(error.into());
+        }
+        if self.state.has_fatal_error(){self.state.stop_recording();let _=self.stream_manager.stop_streams();let _=self.pipeline_manager.stop().await;return Err(RecordingStartError::Other(anyhow::anyhow!("Audio pipeline stopped during startup")));}
 
         // Start device monitoring to detect disconnects
         if let Some(ref mut monitor) = self.device_monitor {
@@ -367,6 +373,8 @@ impl RecordingManager {
     /// Save recording after transcription is complete
     pub async fn save_recording_only<R: tauri::Runtime>(&mut self, app: &tauri::AppHandle<R>) -> Result<()> {
         debug!("Saving recording with transcript chunks");
+        self.recording_saver.set_transcription_incomplete(super::transcription::worker::has_incomplete_transcription());
+        self.recording_saver.set_capture_error(self.state.get_last_error().map(|error|error.user_message().to_owned()));
 
         // Get actual recording duration from state
         let recording_duration = self.state.get_active_recording_duration();
@@ -382,7 +390,7 @@ impl RecordingManager {
             }
             Err(e) => {
                 error!("Failed to save recording: {}", e);
-                // Don't fail the stop operation if saving fails
+                return Err(anyhow::anyhow!(e));
             }
         }
 
@@ -421,7 +429,7 @@ impl RecordingManager {
             }
             Err(e) => {
                 error!("Failed to save recording: {}", e);
-                // Don't fail the stop operation if saving fails
+                return Err(anyhow::anyhow!(e));
             }
         }
 
@@ -515,6 +523,8 @@ impl RecordingManager {
     }
 
     /// Add a structured transcript segment to be saved later
+    pub(crate) fn history_handle(&self)->Arc<std::sync::Mutex<Vec<super::recording_saver::TranscriptSegment>>> {self.recording_saver.history_handle()}
+
     pub fn add_transcript_segment(&self, segment: super::recording_saver::TranscriptSegment) {
         self.recording_saver.add_transcript_segment(segment);
     }

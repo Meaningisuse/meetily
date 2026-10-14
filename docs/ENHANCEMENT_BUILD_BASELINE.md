@@ -74,3 +74,7 @@ cargo run --locked -p meetily --example whisper_smoke -- /path/to/ggml-tiny.en.b
 ```
 
 11,000ms 样例：CPU 742ms、Metal 3,363ms（均含模型初始化），文本相同；输出两个原始模型时间段 0–8,000ms 与 8,000–11,000ms。小样例不用于比较长期性能，也不用于中文说话人准确率结论。完整会议性能由后续 P4 验收报告独立记录。
+
+## F4原生依赖增量
+
+为修复长录音VAD内存/起点错误，将此前锁定的silero-rs26a6460以原模型、MIT许可证保留到vendor/silero，只修正两个方法。工作区仍仅两个应用包；Cargo.lock仅移除该包的Git source，其他依赖版本未变。F4 Cargo.lock SHA256：`d6d39143dc401e586d1860d0e64237db54dc1deed05b752c398d067668a0cb79`。frontend锁文件不变；后续任务若增加新依赖，须另外记录。

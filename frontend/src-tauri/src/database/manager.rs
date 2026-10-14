@@ -1,3 +1,4 @@
+use super::recovery::RecoveryService;
 use sqlx::{migrate::MigrateDatabase, Result, Sqlite, SqlitePool, Transaction};
 use std::fs;
 use std::path::Path;
@@ -16,14 +17,20 @@ impl DatabaseManager {
             }
         }
 
-        if !Path::new(tauri_db_path).exists() {
+        let db_path=Path::new(tauri_db_path);
+        let existing=db_path.exists() || Path::new(backend_db_path).exists();
+        if db_path.exists() && Path::new(&format!("{tauri_db_path}-wal")).exists() {
+            let backup=RecoveryService::backup_before_recovery(db_path).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+            log::info!("Preserved startup DB/WAL/SHM evidence at {}",backup.display());
+        }
+        if !db_path.exists() {
             if Path::new(backend_db_path).exists() {
                 log::info!(
                     "Copying database from {} to {}",
                     backend_db_path,
                     tauri_db_path
                 );
-                fs::copy(backend_db_path, tauri_db_path).map_err(|e| sqlx::Error::Io(e))?;
+                RecoveryService::copy_online_path(Path::new(backend_db_path),db_path).await.map_err(|e|sqlx::Error::Protocol(e.to_string()))?;
             } else {
                 log::info!("Creating database at {}", tauri_db_path);
                 Sqlite::create_database(tauri_db_path).await?;
@@ -32,7 +39,17 @@ impl DatabaseManager {
 
         let pool = SqlitePool::connect(tauri_db_path).await?;
 
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        let migration_result=async {
+            let migrator=sqlx::migrate!("./migrations");
+            let tracked:i64=sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name='_sqlx_migrations'").fetch_one(&pool).await?;
+            let applied:Vec<i64>=if tracked>0 {sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success=1").fetch_all(&pool).await?} else {Vec::new()};
+            if existing && migrator.iter().any(|m| !applied.contains(&m.version)) {
+                let backup=RecoveryService::migration_backup(&pool,db_path).await.map_err(|e|sqlx::Error::Protocol(e.to_string()))?;
+                log::info!("Pre-migration consistent backup: {}",backup.display());
+            }
+            migrator.run(&pool).await.map_err(sqlx::Error::from)
+        }.await;
+        if let Err(error)=migration_result { pool.close().await; return Err(error); }
 
         Ok(DatabaseManager { pool })
     }
@@ -62,57 +79,18 @@ impl DatabaseManager {
             .to_string_lossy()
             .to_string();
 
-        // WAL file paths for defensive cleanup
-        let wal_path = app_data_dir.join("meeting_minutes.sqlite-wal");
-        let shm_path = app_data_dir.join("meeting_minutes.sqlite-shm");
-
-        log::info!("Tauri DB path: {}", tauri_db_path);
-        log::info!("Legacy backend DB path: {}", backend_db_path);
-
-        // Try to open database with defensive WAL handling
-        match Self::new(&tauri_db_path, &backend_db_path).await {
-            Ok(db_manager) => {
-                log::info!("Database opened successfully");
-                Ok(db_manager)
-            }
-            Err(e) => {
-                // Check if error is due to corrupted WAL file
-                let error_msg = e.to_string();
-                if error_msg.contains("malformed") || error_msg.contains("corrupt") {
-                    log::warn!("Database appears corrupted, likely due to orphaned WAL file. Attempting recovery...");
-                    log::warn!("Error details: {}", error_msg);
-
-                    // Delete potentially corrupted WAL/SHM files
-                    if wal_path.exists() {
-                        match fs::remove_file(&wal_path) {
-                            Ok(_) => log::info!("Removed orphaned WAL file: {:?}", wal_path),
-                            Err(e) => log::warn!("Failed to remove WAL file: {}", e),
-                        }
-                    }
-                    if shm_path.exists() {
-                        match fs::remove_file(&shm_path) {
-                            Ok(_) => log::info!("Removed orphaned SHM file: {:?}", shm_path),
-                            Err(e) => log::warn!("Failed to remove SHM file: {}", e),
-                        }
-                    }
-
-                    // Retry connection without WAL files
-                    log::info!("Retrying database connection after WAL cleanup...");
-                    match Self::new(&tauri_db_path, &backend_db_path).await {
-                        Ok(db_manager) => {
-                            log::info!("Database opened successfully after WAL recovery");
-                            Ok(db_manager)
-                        }
-                        Err(retry_err) => {
-                            log::error!("Database connection failed even after WAL cleanup: {}", retry_err);
-                            Err(retry_err)
-                        }
-                    }
-                } else {
-                    // Not a WAL-related error, propagate original error
-                    log::error!("Database connection failed: {}", error_msg);
-                    Err(e)
+        match Self::new(&tauri_db_path,&backend_db_path).await {
+            Ok(manager)=>Ok(manager),
+            Err(error)=> {
+                let message=error.to_string();
+                if message.contains("malformed") || message.contains("corrupt") {
+                    // All application connections from the failed attempt have
+                    // been closed. Do not discard a possibly committed WAL.
+                    let backup=RecoveryService::backup_before_recovery(Path::new(&tauri_db_path)).map_err(|e|sqlx::Error::Protocol(e.to_string()))?;
+                    log::error!("Database needs recovery. Original DB/WAL/SHM retained; evidence: {}",backup.display());
+                    return Err(sqlx::Error::Protocol(format!("Database recovery is required. Original files were retained; recovery materials: {}",backup.display())));
                 }
+                Err(error)
             }
         }
     }
@@ -151,7 +129,7 @@ impl DatabaseManager {
             target_legacy_path.display()
         );
 
-        fs::copy(legacy_db_path, &target_legacy_path).map_err(|e| sqlx::Error::Io(e))?;
+        RecoveryService::copy_online_path(Path::new(legacy_db_path),&target_legacy_path).await.map_err(|e|sqlx::Error::Protocol(e.to_string()))?;
 
         // Now use the standard initialization which will detect and migrate the legacy db
         Self::new_from_app_handle(app_handle).await

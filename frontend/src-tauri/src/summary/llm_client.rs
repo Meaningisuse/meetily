@@ -58,7 +58,7 @@ pub fn build_openai_compat_chat_body(
     let (max_tokens_val, temperature_val, top_p_val) = if *provider == LLMProvider::CustomOpenAI {
         (max_tokens, temperature, top_p)
     } else {
-        (None, None, None)
+        (max_tokens, None, None)
     };
 
     serde_json::json!(ChatRequest {
@@ -88,6 +88,8 @@ pub struct ChatResponse {
 
 #[derive(Deserialize, Debug)]
 pub struct Choice {
+    #[serde(default)]
+    pub finish_reason: Option<String>,
     pub message: MessageContent,
 }
 
@@ -113,6 +115,8 @@ pub struct ClaudeRequest {
 // Claude-specific response structure
 #[derive(Deserialize, Debug)]
 pub struct ClaudeChatResponse {
+    #[serde(default)]
+    pub stop_reason: Option<String>,
     pub content: Vec<ClaudeChatContent>,
 }
 
@@ -125,6 +129,9 @@ pub struct ClaudeChatContent {
 
 impl ClaudeChatResponse {
     fn completion(&self) -> Option<LlmCompletion> {
+        if self.stop_reason.as_deref() == Some("max_tokens") {
+            return None;
+        }
         let content = self
             .content
             .iter()
@@ -134,9 +141,10 @@ impl ClaudeChatResponse {
             .to_string();
         Some(LlmCompletion {
             content,
-            reasoning_stripped: self.content.iter().any(|block| {
-                matches!(block.block_type.as_str(), "thinking" | "redacted_thinking")
-            }),
+            reasoning_stripped: self
+                .content
+                .iter()
+                .any(|block| matches!(block.block_type.as_str(), "thinking" | "redacted_thinking")),
         })
     }
 }
@@ -149,6 +157,13 @@ pub(crate) struct LlmCompletion {
 
 impl ChatResponse {
     fn completion(&self) -> Result<LlmCompletion, String> {
+        if self
+            .choices
+            .first()
+            .is_some_and(|c| c.finish_reason.as_deref() == Some("length"))
+        {
+            return Err("Provider output reached its token limit; source preserved".into());
+        }
         let message = &self
             .choices
             .first()
@@ -161,10 +176,13 @@ impl ChatResponse {
                 .unwrap_or_default()
                 .trim()
                 .to_string(),
-            reasoning_stripped: [message.reasoning.as_deref(), message.reasoning_content.as_deref()]
-                .into_iter()
-                .flatten()
-                .any(|reasoning| !reasoning.trim().is_empty()),
+            reasoning_stripped: [
+                message.reasoning.as_deref(),
+                message.reasoning_content.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|reasoning| !reasoning.trim().is_empty()),
         })
     }
 }
@@ -209,6 +227,84 @@ pub(crate) fn ollama_rejects_reasoning_effort(status: reqwest::StatusCode, body:
                 && (message.contains("not supported") || message.contains("invalid")))
     });
     matches_message
+}
+/// Native Ollama requests carry the exact runtime window used by chunking.
+/// Other providers keep their existing wire protocol and explicit output limit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn generate_summary_with_context(
+    client: &Client,
+    provider: &LLMProvider,
+    model_name: &str,
+    api_key: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    ollama_endpoint: Option<&str>,
+    custom_openai_endpoint: Option<&str>,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    app_data_dir: Option<&PathBuf>,
+    cancellation_token: Option<&CancellationToken>,
+    model_context: usize,
+) -> Result<LlmCompletion, String> {
+    if provider != &LLMProvider::Ollama {
+        return generate_summary(
+            client,
+            provider,
+            model_name,
+            api_key,
+            system_prompt,
+            user_prompt,
+            ollama_endpoint,
+            custom_openai_endpoint,
+            max_tokens,
+            temperature,
+            top_p,
+            app_data_dir,
+            cancellation_token,
+        )
+        .await;
+    }
+    if model_context < 1 || model_context > 32768 {
+        return Err("Ollama context must be between1 and32768".into());
+    }
+    let url = format!(
+        "{}/api/chat",
+        ollama_endpoint
+            .unwrap_or("http://localhost:11434")
+            .trim_end_matches('/')
+    );
+    let body = serde_json::json!({"model":model_name,"messages":[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],"stream":false,"options":{"num_ctx":model_context,"num_predict":max_tokens.unwrap_or(512)}});
+    let response = await_or_cancel(
+        client
+            .post(url)
+            .json(&body)
+            .timeout(REQUEST_TIMEOUT_DURATION)
+            .send(),
+        cancellation_token,
+    )
+    .await?
+    .map_err(|e| format!("Ollama request failed: {e}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(format!("Ollama returned HTTP{status}"));
+    }
+    let value: serde_json::Value = await_or_cancel(response.json(), cancellation_token)
+        .await?
+        .map_err(|e| format!("Invalid Ollama response: {e}"))?;
+    if value["done"] != true || value["done_reason"] == "length" {
+        return Err("Ollama output is incomplete; original source preserved".into());
+    }
+    let message = &value["message"];
+    let content = message["content"]
+        .as_str()
+        .ok_or("No visible content in Ollama response")?
+        .trim()
+        .to_owned();
+    Ok(LlmCompletion {
+        content,
+        reasoning_stripped: message["thinking"].as_str().is_some_and(|s| !s.is_empty()),
+    })
 }
 /// LLM Provider enumeration for multi-provider support
 #[derive(Debug, Clone, PartialEq)]
@@ -289,6 +385,7 @@ pub(crate) async fn generate_summary(
             system_prompt,
             user_prompt,
             cancellation_token,
+            max_tokens,
         )
         .await
         .map(|content| LlmCompletion {
@@ -342,7 +439,10 @@ pub(crate) async fn generate_summary(
                     .parse()
                     .map_err(|_| "Invalid anthropic version".to_string())?,
             );
-            ("https://api.anthropic.com/v1/messages".to_string(), header_map)
+            (
+                "https://api.anthropic.com/v1/messages".to_string(),
+                header_map,
+            )
         }
         LLMProvider::BuiltInAI => {
             // This case is handled earlier with early returns
@@ -383,7 +483,7 @@ pub(crate) async fn generate_summary(
             model: model_name.to_string(),
             // Shared budget: on models with thinking enabled by default this
             // covers thinking tokens as well as the answer.
-            max_tokens: 8192,
+            max_tokens: max_tokens.unwrap_or(8192),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: user_prompt.to_string(),
@@ -391,7 +491,11 @@ pub(crate) async fn generate_summary(
         })
     };
 
-    info!("🐞 LLM Request to {}: model={}", provider_name(provider), model_name);
+    info!(
+        "🐞 LLM Request to {}: model={}",
+        provider_name(provider),
+        model_name
+    );
 
     // Send request with timeout and cancellation support
     let request_future = client
@@ -440,7 +544,8 @@ pub(crate) async fn generate_summary(
         let error_body = await_or_cancel(response.text(), cancellation_token)
             .await?
             .unwrap_or_else(|error| format!("Failed to read LLM error response body: {error}"));
-        if provider != &LLMProvider::Ollama || !ollama_rejects_reasoning_effort(status, &error_body) {
+        if provider != &LLMProvider::Ollama || !ollama_rejects_reasoning_effort(status, &error_body)
+        {
             return Err(format!(
                 "LLM API request failed with status {}: {}",
                 status, error_body
@@ -486,12 +591,10 @@ pub(crate) async fn generate_summary(
 
     // Parse response based on provider
     if provider == &LLMProvider::Claude {
-        let chat_response = await_or_cancel(
-            response.json::<ClaudeChatResponse>(),
-            cancellation_token,
-        )
-        .await?
-        .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
+        let chat_response =
+            await_or_cancel(response.json::<ClaudeChatResponse>(), cancellation_token)
+                .await?
+                .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
 
         info!("🐞 LLM Response received from Claude");
 
@@ -500,12 +603,9 @@ pub(crate) async fn generate_summary(
             .ok_or("No text content in LLM response")?;
         Ok(completion)
     } else {
-        let chat_response = await_or_cancel(
-            response.json::<ChatResponse>(),
-            cancellation_token,
-        )
-        .await?
-        .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
+        let chat_response = await_or_cancel(response.json::<ChatResponse>(), cancellation_token)
+            .await?
+            .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
 
         info!("🐞 LLM Response received from {}", provider_name(provider));
         chat_response.completion()
@@ -564,6 +664,72 @@ mod tests {
         serde_json::from_slice(&request[headers_end..]).expect("request body should be valid JSON")
     }
 
+    #[tokio::test]
+    async fn ollama_budget_reaches_the_runtime_context_and_output_options() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("POST /api/chat "));
+            let body = request_json(&request);
+            assert_eq!(body["options"]["num_ctx"], 4096);
+            assert_eq!(body["options"]["num_predict"], 512);
+            assert_eq!(body["stream"], false);
+            use tokio::io::AsyncWriteExt;
+            let body = r##"{"message":{"content":"# Summary\n\nFinal action"},"done":true,"done_reason":"stop"}"##;
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).as_bytes()).await.unwrap();
+        });
+        let result = generate_summary_with_context(
+            &Client::new(),
+            &LLMProvider::Ollama,
+            "test",
+            "",
+            "system",
+            "user",
+            Some(&format!("http://{address}")),
+            None,
+            Some(512),
+            None,
+            None,
+            None,
+            None,
+            4096,
+        )
+        .await
+        .unwrap();
+        assert!(result.content.contains("Final action"));
+        task.await.unwrap();
+    }
+    #[test]
+    fn length_limited_completions_are_not_successful_summaries() {
+        let openai:ChatResponse=serde_json::from_value(serde_json::json!({"choices":[{"message":{"content":"# Incomplete"},"finish_reason":"length"}]})).unwrap();
+        assert!(openai.completion().is_err());
+        let claude:ClaudeChatResponse=serde_json::from_value(serde_json::json!({"content":[{"type":"text","text":"Incomplete"}],"stop_reason":"max_tokens"})).unwrap();
+        assert!(claude.completion().is_none());
+    }
+    #[test]
+    fn explicit_output_budget_reaches_all_compatible_providers() {
+        for provider in [
+            LLMProvider::OpenAI,
+            LLMProvider::Groq,
+            LLMProvider::OpenRouter,
+            LLMProvider::Ollama,
+            LLMProvider::CustomOpenAI,
+        ] {
+            let body = build_openai_compat_chat_body(
+                &provider,
+                "test",
+                "system",
+                "user",
+                Some(512),
+                None,
+                None,
+            );
+            assert_eq!(body["max_tokens"], 512);
+        }
+    }
+
     #[test]
     fn only_ollama_disables_reasoning_and_custom_sampling_is_preserved() {
         for provider in [
@@ -572,16 +738,30 @@ mod tests {
             LLMProvider::OpenRouter,
             LLMProvider::CustomOpenAI,
         ] {
-            assert!(build_openai_compat_chat_body(&provider, "model", "sys", "user", None, None, None)
-                .get("reasoning_effort")
-                .is_none());
+            assert!(build_openai_compat_chat_body(
+                &provider, "model", "sys", "user", None, None, None
+            )
+            .get("reasoning_effort")
+            .is_none());
         }
         let ollama = build_openai_compat_chat_body(
-            &LLMProvider::Ollama, "model", "sys", "user", None, None, None,
+            &LLMProvider::Ollama,
+            "model",
+            "sys",
+            "user",
+            None,
+            None,
+            None,
         );
         assert_eq!(ollama["reasoning_effort"], "none");
         let custom = build_openai_compat_chat_body(
-            &LLMProvider::CustomOpenAI, "model", "sys", "user", Some(12), Some(0.3), Some(0.8),
+            &LLMProvider::CustomOpenAI,
+            "model",
+            "sys",
+            "user",
+            Some(12),
+            Some(0.3),
+            Some(0.8),
         );
         assert_eq!(custom["max_tokens"], 12);
         assert_eq!(custom["temperature"].as_f64(), Some(0.3_f32 as f64));
@@ -673,7 +853,10 @@ mod tests {
                 "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 rejection_body.len()
             );
-            stream.write_all(rejection_headers.as_bytes()).await.unwrap();
+            stream
+                .write_all(rejection_headers.as_bytes())
+                .await
+                .unwrap();
             stream.write_all(rejection_body).await.unwrap();
             stream.flush().await.unwrap();
             drop(stream);
@@ -757,7 +940,10 @@ mod tests {
                 "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 rejection_body.len()
             );
-            stream.write_all(rejection_headers.as_bytes()).await.unwrap();
+            stream
+                .write_all(rejection_headers.as_bytes())
+                .await
+                .unwrap();
             stream.write_all(rejection_body).await.unwrap();
             stream.flush().await.unwrap();
             drop(stream);
@@ -767,13 +953,15 @@ mod tests {
             let body = request_json(&request);
             assert!(body.get("reasoning_effort").is_none());
 
-            let completion_body =
-                br#"{"choices":[{"message":{"content":"Meeting summary."}}]}"#;
+            let completion_body = br#"{"choices":[{"message":{"content":"Meeting summary."}}]}"#;
             let completion_headers = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 completion_body.len()
             );
-            stream.write_all(completion_headers.as_bytes()).await.unwrap();
+            stream
+                .write_all(completion_headers.as_bytes())
+                .await
+                .unwrap();
             stream.flush().await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
             let _ = retry_headers_sent.send(());
@@ -836,7 +1024,10 @@ mod tests {
                 "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 rejection_body.len()
             );
-            stream.write_all(rejection_headers.as_bytes()).await.unwrap();
+            stream
+                .write_all(rejection_headers.as_bytes())
+                .await
+                .unwrap();
             stream.write_all(rejection_body).await.unwrap();
             stream.flush().await.unwrap();
             drop(stream);
@@ -846,13 +1037,15 @@ mod tests {
             let body = request_json(&request);
             assert!(body.get("reasoning_effort").is_none());
 
-            let completion_body =
-                br#"{"choices":[{"message":{"content":"Meeting summary."}}]}"#;
+            let completion_body = br#"{"choices":[{"message":{"content":"Meeting summary."}}]}"#;
             let completion_headers = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 completion_body.len()
             );
-            stream.write_all(completion_headers.as_bytes()).await.unwrap();
+            stream
+                .write_all(completion_headers.as_bytes())
+                .await
+                .unwrap();
             stream.write_all(completion_body).await.unwrap();
             stream.flush().await.unwrap();
         });
@@ -924,5 +1117,3 @@ fn provider_name(provider: &LLMProvider) -> &str {
         LLMProvider::CustomOpenAI => "Custom OpenAI",
     }
 }
-
-

@@ -64,15 +64,15 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
                 meetingFolder: meeting.folderPath
               });
 
-              // If no audio files, clear folderPath to show "No audio" in UI
+              // Audio availability is separate from the durable transcript location.
               return {
                 ...meeting,
-                folderPath: hasAudio ? meeting.folderPath : undefined
+                audioAvailable: hasAudio
               };
             } catch (error) {
               console.warn('Failed to check audio for meeting:', error);
               // On error, assume no audio to be safe
-              return { ...meeting, folderPath: undefined };
+              return { ...meeting, audioAvailable: false };
             }
           }
           return meeting;
@@ -117,10 +117,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       }
 
       // 2. Load all transcripts
-      const transcripts = await loadMeetingTranscripts(meetingId);
-      if (transcripts.length === 0) {
-        throw new Error('No transcripts found for this meeting');
-      }
+      let transcripts = await loadMeetingTranscripts(meetingId);
 
       // 3. Check for folder path
       let folderPath = metadata.folderPath;
@@ -134,6 +131,18 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
           folderPath = undefined;
         }
       }
+
+      // Replay durable native inputs explicitly. Failure keeps the meeting and
+      // checkpoints available; do not mark an incomplete recovery as saved.
+      if (folderPath) {
+        const replay = await invoke<Array<{ text: string; sequence_id: number; timestamp: string; confidence: number; audio_start_time: number; audio_end_time: number; duration: number }>>('recover_transcription_backlog', { meetingFolder: folderPath });
+        const bySequence = new Map(transcripts.map(t => [t.sequenceId, t]));
+        for (const segment of replay) {
+          if (segment.text.trim()) bySequence.set(segment.sequence_id, { ...segment, meetingId, sequenceId: segment.sequence_id, storedAt: Date.now() });
+        }
+        transcripts = [...bySequence.values()].sort((a,b) => (a.sequenceId ?? 0)-(b.sequenceId ?? 0));
+      }
+      if (transcripts.length === 0) throw new Error('No transcripts are available after recovery');
 
       // 4. Attempt audio recovery if folder path exists
       let audioRecoveryStatus: AudioRecoveryStatus | null = null;
@@ -198,7 +207,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
 
 
       // 8. Clean up checkpoint files
-      if (folderPath) {
+      if (folderPath && audioRecoveryStatus?.status === 'success') {
         try {
           await invoke('cleanup_checkpoints', { meetingFolder: folderPath });
         } catch (error) {

@@ -100,6 +100,8 @@ impl IncrementalAudioSaver {
             &checkpoint_path
         )?;
 
+        std::fs::File::open(&checkpoint_path)?.sync_all()?;
+        std::fs::File::open(&self.checkpoints_dir)?.sync_all()?;
         let duration_seconds = audio_data.len() as f32 / self.sample_rate as f32;
         self.checkpoint_count += 1;
 
@@ -132,13 +134,10 @@ impl IncrementalAudioSaver {
         let final_audio_path = self.meeting_folder.join("audio.mp4");
         self.merge_checkpoints(&final_audio_path).await?;
 
-        // Clean up checkpoints directory
-        info!("Cleaning up {} checkpoint files", self.checkpoint_count);
-        if let Err(e) = std::fs::remove_dir_all(&self.checkpoints_dir) {
-            warn!("Failed to clean up checkpoints directory: {}", e);
-            // Non-fatal - user can manually delete
-        }
-
+        std::fs::File::open(&final_audio_path)?.sync_all()?;
+        std::fs::File::open(&self.meeting_folder)?.sync_all()?;
+        // Metadata/transcript commit is owned by RecordingSaver. A merged
+        // audio file alone cannot authorize destroying its source checkpoints.
         info!("Finalized recording: {}", final_audio_path.display());
 
         Ok(final_audio_path)
@@ -214,12 +213,22 @@ impl IncrementalAudioSaver {
         Ok(())
     }
 
+    pub fn cleanup_checkpoints_after_acceptance(&self)->Result<()> {
+        let audio=self.meeting_folder.join("audio.mp4");
+        if !audio.is_file(){return Err(anyhow!("Cannot clean checkpoints before final audio exists"));}
+        std::fs::File::open(&audio)?.sync_all()?;
+        if self.checkpoints_dir.exists(){std::fs::remove_dir_all(&self.checkpoints_dir)?;std::fs::File::open(&self.meeting_folder)?.sync_all()?;}
+        Ok(())
+    }
+
     /// Get the meeting folder path
     pub fn get_meeting_folder(&self) -> &PathBuf {
         &self.meeting_folder
     }
 
     /// Get current checkpoint count
+    pub fn buffered_sample_count(&self)->usize {self.checkpoint_buffer.iter().map(|chunk|chunk.data.len()).sum()}
+
     pub fn get_checkpoint_count(&self) -> u32 {
         self.checkpoint_count
     }
@@ -451,7 +460,9 @@ mod tests {
         let final_path = saver.finalize().await.unwrap();
         assert!(final_path.exists());
 
-        // Verify checkpoints directory deleted
+        // Final audio alone is not acceptance of transcript and metadata.
+        assert!(meeting_folder.join(".checkpoints").exists());
+        saver.cleanup_checkpoints_after_acceptance().unwrap();
         assert!(!meeting_folder.join(".checkpoints").exists());
     }
 
@@ -471,5 +482,18 @@ mod tests {
         let result = saver.finalize().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No audio checkpoints"));
+    }
+}
+
+#[cfg(test)]
+mod source_retention_tests {
+    use super::*;
+    #[tokio::test]
+    async fn final_audio_keeps_checkpoints_until_metadata_acceptance() {
+        let directory=tempfile::tempdir().unwrap();std::fs::create_dir(directory.path().join(".checkpoints")).unwrap();
+        let mut saver=IncrementalAudioSaver::new(directory.path().to_path_buf(),48000).unwrap();
+        saver.add_chunk(AudioChunk {data:vec![0.125;48000],sample_rate:48000,timestamp:0.0,chunk_id:0,device_type:crate::audio::recording_state::DeviceType::Microphone}).unwrap();
+        let output=saver.finalize().await.unwrap();assert!(output.is_file());
+        assert!(directory.path().join(".checkpoints/audio_chunk_000.mp4").is_file(),"A later metadata write may fail; keep the input checkpoint until accepted");
     }
 }

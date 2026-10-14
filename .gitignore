@@ -78,3 +78,8 @@ experiments/
 target/
 
 frontend/src-tauri/binaries/
+
+# Licensed assets of the maintained Silero dependency are build inputs.
+!vendor/silero/models/
+!vendor/silero/models/silero_vad.onnx
+!vendor/silero/tests/audio/*.wav

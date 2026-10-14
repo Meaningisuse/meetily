@@ -9,6 +9,7 @@ import { listen } from '@tauri-apps/api/event';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import Analytics from '@/lib/analytics';
+import { toast } from 'sonner';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import type { TranscriptionErrorPayload } from '@/services/transcriptService';
 
@@ -245,6 +246,9 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     };
   }, []);
 
+  const stopOnFatalRef = useRef(handleStopRecording);
+  stopOnFatalRef.current = handleStopRecording;
+
   useEffect(() => {
     console.log('Setting up recording event listeners');
     let unsubscribes: (() => void)[] = [];
@@ -308,7 +312,16 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           setSpeechDetected(true);
         });
 
+        const fatalRecordingUnsubscribe = await listen<{ message: string }>('recording-fatal-error', event => {
+          toast.error('Recording stopped with an error', { description: event.payload.message, duration: 10000 });
+          void stopOnFatalRef.current();
+        });
+        const catchupWarningUnsubscribe = await listen<string>('transcription-warning', event => {
+          toast.warning('Transcription needs attention', { description: event.payload, duration: 10000 });
+        });
         unsubscribes = [
+          fatalRecordingUnsubscribe,
+          catchupWarningUnsubscribe,
           transcriptErrorUnsubscribe,
           transcriptionErrorUnsubscribe,
           speechDetectedUnsubscribe

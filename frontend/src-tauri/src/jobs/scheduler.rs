@@ -25,6 +25,14 @@ impl JobService {
             cancellations: Arc::new(DashMap::new()),
         }
     }
+    pub(crate) fn try_audio_recovery_slot(&self) -> Result<OwnedSemaphorePermit, EnhancementError> {
+        self.slot.clone().try_acquire_owned().map_err(|_| {
+            EnhancementError::new(
+                "BUSY",
+                "Another heavy job is running. Retry saved audio when it finishes.",
+            )
+        })
+    }
     pub async fn enqueue(
         &self,
         kind: JobKind,

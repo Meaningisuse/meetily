@@ -46,6 +46,8 @@ pub enum AudioError {
     PermissionDenied,
     BufferOverflow,
     SampleRateUnsupported,
+    BacklogWithoutAudio,
+    StorageFailed,
 }
 
 impl AudioError {
@@ -61,8 +63,8 @@ impl AudioError {
             AudioError::InitializationFailed => false,
             AudioError::ConfigurationError => false,
             AudioError::PermissionDenied => false,
-            AudioError::BufferOverflow => true,
-            AudioError::SampleRateUnsupported => false,
+            AudioError::BufferOverflow => false,
+            AudioError::SampleRateUnsupported | AudioError::BacklogWithoutAudio | AudioError::StorageFailed => false,
         }
     }
 
@@ -77,8 +79,10 @@ impl AudioError {
             AudioError::InitializationFailed => "Failed to initialize audio system",
             AudioError::ConfigurationError => "Audio configuration error",
             AudioError::PermissionDenied => "Microphone permission denied",
-            AudioError::BufferOverflow => "Audio buffer overflow",
+            AudioError::BufferOverflow => "Recording stopped because the audio capture queue overflowed. Some final audio may be incomplete.",
             AudioError::SampleRateUnsupported => "Audio sample rate not supported",
+            AudioError::BacklogWithoutAudio => "Recording stopped: transcription backlog exceeded the limit and audio saving is disabled. Missing intervals cannot be recovered.",
+            AudioError::StorageFailed => "Recording stopped: audio or catch-up data could not be saved. Check disk space; existing recovery files were retained.",
         }
     }
 }
@@ -102,7 +106,7 @@ pub struct RecordingState {
     system_device: Mutex<Option<Arc<AudioDevice>>>,
 
     // Audio pipeline
-    audio_sender: Mutex<Option<mpsc::UnboundedSender<AudioChunk>>>,
+    audio_sender: Mutex<Option<mpsc::Sender<AudioChunk>>>,
 
     // Memory optimization
     buffer_pool: AudioBufferPool,
@@ -231,7 +235,7 @@ impl RecordingState {
     }
 
     // Audio pipeline management
-    pub fn set_audio_sender(&self, sender: mpsc::UnboundedSender<AudioChunk>) {
+    pub fn set_audio_sender(&self, sender: mpsc::Sender<AudioChunk>) {
         *self.audio_sender.lock().unwrap() = Some(sender);
     }
 
@@ -241,8 +245,14 @@ impl RecordingState {
             return Ok(()); // Silently discard chunks while paused
         }
 
-        if let Some(sender) = self.audio_sender.lock().unwrap().as_ref() {
-            sender.send(chunk).map_err(|_| anyhow::anyhow!("Failed to send audio chunk"))?;
+        let sender=self.audio_sender.lock().unwrap().clone();
+        if let Some(sender) = sender {
+            if chunk.data.len()>48000 { self.report_error(AudioError::BufferOverflow);return Err(anyhow::anyhow!("Capture chunk exceeds one second")); }
+            match sender.try_send(chunk) {
+                Ok(())=>{},
+                Err(mpsc::error::TrySendError::Full(_))=>{self.report_error(AudioError::BufferOverflow);return Err(anyhow::anyhow!("Capture queue full; recording stopped"));},
+                Err(mpsc::error::TrySendError::Closed(_))=>{self.report_error(AudioError::ChannelClosed);return Err(anyhow::anyhow!("Audio channel closed"));},
+            }
 
             // Update statistics
             let mut stats = self.stats.lock().unwrap();
@@ -414,5 +424,19 @@ impl Clone for RecordingStats {
             total_duration: self.total_duration,
             last_activity: self.last_activity,
         }
+    }
+}
+#[cfg(test)]
+mod capture_backpressure_tests {
+    use super::*;
+    #[tokio::test]
+    async fn full_capture_queue_returns_immediately_and_stops_with_error() {
+        let state=RecordingState::new();state.start_recording().unwrap();
+        let (sender,_receiver)=mpsc::channel(1);state.set_audio_sender(sender);
+        let make=||AudioChunk {data:vec![0.0;480],sample_rate:48000,timestamp:0.0,chunk_id:1,device_type:DeviceType::Microphone};
+        state.send_audio_chunk(make()).unwrap();
+        let started=Instant::now();assert!(state.send_audio_chunk(make()).is_err());
+        assert!(started.elapsed()<std::time::Duration::from_millis(50));
+        assert!(!state.is_recording());
     }
 }

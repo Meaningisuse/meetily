@@ -136,6 +136,7 @@ pub async fn generate_with_builtin(
     system_prompt: &str,
     user_prompt: &str,
     cancellation_token: Option<&CancellationToken>,
+    output_budget: Option<u32>,
 ) -> Result<String> {
     // Check cancellation at start
     if let Some(token) = cancellation_token {
@@ -182,7 +183,7 @@ pub async fn generate_with_builtin(
     let sampling = model_def.sampling.sanitize_for_llama_helper();
     let request = Request::Generate {
         prompt: formatted_prompt,
-        max_tokens: Some(models::DEFAULT_MAX_TOKENS),
+        max_tokens: Some(output_budget.map(|n| n.min(i32::MAX as u32) as i32).unwrap_or(models::DEFAULT_MAX_TOKENS)),
         context_size: Some(model_def.context_size),
         model_path: Some(model_path.to_string_lossy().to_string()),
         temperature: Some(sampling.temperature),
