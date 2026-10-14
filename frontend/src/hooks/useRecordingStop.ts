@@ -239,13 +239,31 @@ export function useRecordingStop(
 
         // Get fresh transcript state (ALL transcripts including late ones)
         const freshTranscripts = [...transcriptsRef.current];
+        const transcriptsForSave = freshTranscripts.flatMap(transcript => {
+          if (!transcript.timed_segments?.length) return [transcript];
+          return transcript.timed_segments.map((timed, index) => {
+            const audioStartTime = timed.start_ms / 1000;
+            const audioEndTime = timed.end_ms / 1000;
+            return {
+              id: `${transcript.id}-${index}`,
+              text: timed.text,
+              timestamp: transcript.timestamp,
+              sequence_id: transcript.sequence_id,
+              confidence: transcript.confidence,
+              audio_start_time: audioStartTime,
+              audio_end_time: audioEndTime,
+              duration: audioEndTime - audioStartTime,
+              timing_precision: 'exact' as const,
+            };
+          });
+        });
 
         // Get folder_path and meeting_name from recording-stopped event
         const folderPath = sessionStorage.getItem('last_recording_folder_path');
         const savedMeetingName = sessionStorage.getItem('last_recording_meeting_name');
 
         console.log('💾 Saving COMPLETE transcripts to database...', {
-          transcript_count: freshTranscripts.length,
+            transcript_count: transcriptsForSave.length,
           meeting_name: savedMeetingName || meetingTitle,
           folder_path: folderPath,
           sample_text: freshTranscripts.length > 0 ? freshTranscripts[0].text.substring(0, 50) + '...' : 'none',
@@ -255,7 +273,7 @@ export function useRecordingStop(
         try {
           const responseData = await storageService.saveMeeting(
             savedMeetingName || meetingTitle || 'New Meeting',  // PREFER savedMeetingName (backend source)
-            freshTranscripts,
+            transcriptsForSave,
             folderPath,
             true
           );

@@ -60,7 +60,7 @@ pub async fn recover_transcription_backlog(
             let id = chunk.chunk_id;
             let start = chunk.timestamp;
             let duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
-            let (text, confidence, is_partial) =
+            let (text, confidence, is_partial, mut timed_segments, provider_precision) =
                 transcribe_chunk_with_provider(&engine, chunk, &app)
                     .await
                     .map_err(|e| e.to_string())?;
@@ -85,6 +85,16 @@ pub async fn recover_transcription_backlog(
                     Some(start),
                     Some(start + duration),
                 ),
+                timed_segments: if provider_precision == TimingPrecision::Exact {
+                    let offset_ms = (start * 1000.0).round() as i64;
+                    for timed in &mut timed_segments {
+                        timed.start_ms = timed.start_ms.saturating_add(offset_ms);
+                        timed.end_ms = timed.end_ms.saturating_add(offset_ms);
+                    }
+                    timed_segments
+                } else {
+                    Vec::new()
+                },
             };
             store
                 .complete(

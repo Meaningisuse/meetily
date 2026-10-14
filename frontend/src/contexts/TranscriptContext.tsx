@@ -316,6 +316,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
             audio_end_time: update.audio_end_time,
             duration: update.duration,
             timing_precision: update.timing_precision,
+            timed_segments: update.timed_segments,
           };
 
           // Add to buffer
@@ -426,6 +427,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
       audio_end_time: update.audio_end_time,
       duration: update.duration,
       timing_precision: update.timing_precision,
+      timed_segments: update.timed_segments,
     };
 
     setTranscripts(prev => {

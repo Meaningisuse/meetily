@@ -19,7 +19,7 @@ use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 use super::audio_processing::create_meeting_folder;
-use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json};
+use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json, TranscriptInput};
 use super::constants::AUDIO_EXTENSIONS;
 use super::recording_preferences::get_default_recordings_folder;
 
@@ -547,8 +547,9 @@ async fn run_import<R: Runtime>(
     info!("Processing {} segments (after splitting)", processable_count);
 
     // Process each speech segment
-    let mut all_transcripts: Vec<(String, f64, f64)> = Vec::new();
+    let mut all_transcripts: Vec<TranscriptInput> = Vec::new();
     let mut total_confidence = 0.0f32;
+    let mut transcribed_segment_count = 0usize;
 
     for (i, segment) in processable_segments.iter().enumerate() {
         if IMPORT_CANCELLED.load(Ordering::SeqCst) {
@@ -581,46 +582,65 @@ async fn run_import<R: Runtime>(
         }
 
         // Transcribe
-        let (text, conf) = if use_parakeet {
+        let (text, conf, timed_segments, timing_precision) = if use_parakeet {
             let engine = parakeet_engine.as_ref().unwrap();
             let text = engine
                 .transcribe_audio(segment.samples.clone())
                 .await
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32)
+            (text, 0.9f32, Vec::new(), TimingPrecision::Unavailable)
         } else {
             let engine = whisper_engine.as_ref().unwrap();
-            let (text, conf, _) = engine
-                .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
+            let (text, conf, _, timed, precision) = engine
+                .transcribe_audio_with_verified_timing(segment.samples.clone(), language.clone())
                 .await
                 .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-            (text, conf)
+            (text, conf, timed, precision)
         };
 
         let trimmed = text.trim();
         if !trimmed.is_empty() {
+            transcribed_segment_count += 1;
             debug!(
                 "Segment {}/{}: {:.1}s, conf={:.2}, text='{}'",
                 i + 1, processable_count, segment_duration_sec, conf,
                 if trimmed.len() > 80 { let mut end = 80; while !trimmed.is_char_boundary(end) { end -= 1; } &trimmed[..end] } else { trimmed }
             );
-            all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms));
+            if timing_precision == TimingPrecision::Exact && !timed_segments.is_empty() {
+                for timed in timed_segments {
+                    all_transcripts.push(TranscriptInput {
+                        text: timed.text,
+                        start_ms: segment.start_timestamp_ms + timed.start_ms as f64,
+                        end_ms: segment.start_timestamp_ms + timed.end_ms as f64,
+                        timing_precision: TimingPrecision::Exact,
+                    });
+                }
+            } else {
+                all_transcripts.push(TranscriptInput {
+                    text,
+                    start_ms: segment.start_timestamp_ms,
+                    end_ms: segment.end_timestamp_ms,
+                    timing_precision: TimingPrecision::from_audio_bounds(
+                        Some(segment.start_timestamp_ms / 1000.0),
+                        Some(segment.end_timestamp_ms / 1000.0),
+                    ),
+                });
+            }
             total_confidence += conf;
         } else {
             debug!("Segment {}/{}: {:.1}s — empty transcription", i + 1, processable_count, segment_duration_sec);
         }
     }
 
-    let transcribed_count = all_transcripts.len();
-    let avg_confidence = if transcribed_count > 0 {
-        total_confidence / transcribed_count as f32
+    let avg_confidence = if transcribed_segment_count > 0 {
+        total_confidence / transcribed_segment_count as f32
     } else {
         0.0
     };
 
     info!(
         "Transcription complete: {} segments transcribed out of {}, avg confidence: {:.2}",
-        transcribed_count, processable_count, avg_confidence
+        transcribed_segment_count, processable_count, avg_confidence
     );
 
     // Check for cancellation
@@ -731,7 +751,7 @@ async fn create_meeting_with_transcripts(
         .bind(segment.audio_start_time)
         .bind(segment.audio_end_time)
         .bind(segment.duration)
-        .bind(TimingPrecision::from_audio_bounds(segment.audio_start_time, segment.audio_end_time).as_str())
+        .bind(segment.timing_precision.as_deref().unwrap_or_else(|| TimingPrecision::from_audio_bounds(segment.audio_start_time, segment.audio_end_time).as_str()))
         .execute(&mut *tx)
         .await
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
@@ -1179,6 +1199,7 @@ mod tests {
                 audio_start_time: Some(0.0),
                 audio_end_time: Some(1.5),
                 duration: Some(1.5),
+                timing_precision: None,
             },
             TranscriptSegment {
                 id: "t-2".to_string(),
@@ -1187,6 +1208,7 @@ mod tests {
                 audio_start_time: Some(2.0),
                 audio_end_time: Some(3.5),
                 duration: Some(1.5),
+                timing_precision: None,
             },
         ];
 

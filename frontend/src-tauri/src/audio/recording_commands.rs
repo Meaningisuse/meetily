@@ -547,31 +547,20 @@ async fn start_recording_with_meeting_name_inner<R: Runtime>(
         let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
             // Parse the transcript update from the event payload
             if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
-                // Create structured transcript segment
-                let segment = crate::audio::recording_saver::TranscriptSegment {
-                    id: format!("seg_{}", update.sequence_id),
-                    text: update.text.clone(),
-                    audio_start_time: update.audio_start_time,
-                    audio_end_time: update.audio_end_time,
-                    duration: update.duration,
-                    display_time: update.timestamp.clone(), // Use wall-clock timestamp for display
-                    confidence: update.confidence,
-                    sequence_id: update.sequence_id,
-                };
-
-                // Save to recording manager
-                if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
-                    if let Some(manager) = manager_guard.as_ref() {
-                        manager.add_transcript_segment(segment);
-                    } else if let Some(history) = &stop_history {
-                        if let Ok(mut history) = history.lock() {
-                            if let Some(existing) = history
-                                .iter_mut()
-                                .find(|s| s.sequence_id == segment.sequence_id)
-                            {
-                                *existing = segment;
-                            } else {
-                                history.push(segment);
+                for segment in crate::audio::recording_saver::transcript_update_segments(&update) {
+                    if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
+                        if let Some(manager) = manager_guard.as_ref() {
+                            manager.add_transcript_segment(segment);
+                        } else if let Some(history) = &stop_history {
+                            if let Ok(mut history) = history.lock() {
+                                if let Some(existing) = history.iter_mut().find(|s| {
+                                    s.sequence_id == segment.sequence_id
+                                        && s.segment_index == segment.segment_index
+                                }) {
+                                    *existing = segment;
+                                } else {
+                                    history.push(segment);
+                                }
                             }
                         }
                     }
@@ -786,31 +775,20 @@ async fn start_recording_with_devices_and_meeting_inner<R: Runtime>(
         let listener_id = app.listen("transcript-update", move |event: tauri::Event| {
             // Parse the transcript update from the event payload
             if let Ok(update) = serde_json::from_str::<TranscriptUpdate>(event.payload()) {
-                // Create structured transcript segment
-                let segment = crate::audio::recording_saver::TranscriptSegment {
-                    id: format!("seg_{}", update.sequence_id),
-                    text: update.text.clone(),
-                    audio_start_time: update.audio_start_time,
-                    audio_end_time: update.audio_end_time,
-                    duration: update.duration,
-                    display_time: update.timestamp.clone(), // Use wall-clock timestamp for display
-                    confidence: update.confidence,
-                    sequence_id: update.sequence_id,
-                };
-
-                // Save to recording manager
-                if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
-                    if let Some(manager) = manager_guard.as_ref() {
-                        manager.add_transcript_segment(segment);
-                    } else if let Some(history) = &stop_history {
-                        if let Ok(mut history) = history.lock() {
-                            if let Some(existing) = history
-                                .iter_mut()
-                                .find(|s| s.sequence_id == segment.sequence_id)
-                            {
-                                *existing = segment;
-                            } else {
-                                history.push(segment);
+                for segment in crate::audio::recording_saver::transcript_update_segments(&update) {
+                    if let Ok(manager_guard) = RECORDING_MANAGER.lock() {
+                        if let Some(manager) = manager_guard.as_ref() {
+                            manager.add_transcript_segment(segment);
+                        } else if let Some(history) = &stop_history {
+                            if let Ok(mut history) = history.lock() {
+                                if let Some(existing) = history.iter_mut().find(|s| {
+                                    s.sequence_id == segment.sequence_id
+                                        && s.segment_index == segment.segment_index
+                                }) {
+                                    *existing = segment;
+                                } else {
+                                    history.push(segment);
+                                }
                             }
                         }
                     }

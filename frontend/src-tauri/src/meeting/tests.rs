@@ -197,6 +197,7 @@ async fn transcript_completion_event_is_atomic_with_transcript_persistence() {
         audio_start_time: Some(1.0),
         audio_end_time: Some(2.0),
         duration: Some(1.0),
+        timing_precision: Some("exact".into()),
     };
     assert!(
         crate::database::repositories::transcript::TranscriptsRepository::save_recorded_transcript(
@@ -253,7 +254,7 @@ async fn transcript_completion_event_is_atomic_with_transcript_persistence() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(precision, "approximate");
+    assert_eq!(precision, "exact");
 }
 
 #[tokio::test]
@@ -273,6 +274,7 @@ async fn legacy_writes_advance_versions_and_invalidate_summary_source() {
             audio_start_time: Some(0.0),
             audio_end_time: Some(1.0),
             duration: Some(1.0),
+            timing_precision: None,
         }],
         None,
     )

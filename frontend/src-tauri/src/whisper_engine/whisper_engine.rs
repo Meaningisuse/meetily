@@ -13,6 +13,10 @@ use reqwest::Client;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use crate::config::WHISPER_MODEL_CATALOG;
+use crate::audio::transcription::{
+    provider::{TimedText, TimingPrecision},
+    whisper_timing::{timing_or_unavailable, verify_whisper_timed_segments, WhisperSegmentTicks},
+};
 use super::acceleration::{whisper_context_acceleration_for, WhisperCompiledBackend};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -549,6 +553,54 @@ impl WhisperEngine {
     
     /// Transcribe audio with streaming support for partial results and adaptive quality
     pub async fn transcribe_audio_with_confidence(&self, audio_data: Vec<f32>, language: Option<String>) -> Result<(String, f32, bool)> {
+        let (text, confidence, is_partial, _) = self
+            .transcribe_audio_with_mode(audio_data, language, false)
+            .await?;
+        Ok((text, confidence, is_partial))
+    }
+
+    /// Return provider segment times only when a timestamp-enabled decode agrees
+    /// with the established no-timestamp transcript. The canonical transcript
+    /// always comes from the established path, so a timing regression cannot
+    /// silently drop text.
+    pub async fn transcribe_audio_with_verified_timing(
+        &self,
+        audio_data: Vec<f32>,
+        language: Option<String>,
+    ) -> Result<(String, f32, bool, Vec<TimedText>, TimingPrecision)> {
+        let (canonical_text, confidence, is_partial, _) = self
+            .transcribe_audio_with_mode(audio_data.clone(), language.clone(), false)
+            .await?;
+        let audio_duration_ms = (audio_data.len() as i64).saturating_mul(1000) / 16_000;
+        let timestamp_result = self
+            .transcribe_audio_with_mode(audio_data.clone(), language, true)
+            .await
+            .map(|(_, _, _, timestamp_segments)| {
+                verify_whisper_timed_segments(
+                    &canonical_text,
+                    &timestamp_segments,
+                    audio_duration_ms,
+                )
+            });
+        if let Err(error) = &timestamp_result {
+            log::warn!("Whisper timestamp pass failed; retaining canonical text without exact timing: {error}");
+        }
+        let (timed_segments, timing_precision) = timing_or_unavailable(timestamp_result);
+        Ok((
+            canonical_text,
+            confidence,
+            is_partial,
+            timed_segments,
+            timing_precision,
+        ))
+    }
+
+    async fn transcribe_audio_with_mode(
+        &self,
+        audio_data: Vec<f32>,
+        language: Option<String>,
+        enable_timestamps: bool,
+    ) -> Result<(String, f32, bool, Vec<WhisperSegmentTicks>)> {
         let ctx_lock = self.current_context.read().await;
         let ctx = ctx_lock.as_ref()
             .ok_or_else(|| anyhow!("No model loaded. Please load a model first."))?;
@@ -575,11 +627,10 @@ impl WhisperEngine {
         params.set_language(language_code);
         params.set_translate(should_translate);
 
-        // CRITICAL: Disable timestamp tokens to prevent whisper.cpp chunking heuristics
-        // The "single timestamp ending - skip entire chunk" optimization incorrectly discards
-        // complete, valid transcriptions. Disabling timestamps forces whisper to return ALL text.
-        params.set_no_timestamps(true);     // Prevent timestamp-based segment skipping
-        params.set_token_timestamps(true);  // Keep for any timestamp-aware features
+        // Keep the established text-only decoder unchanged. Timestamp mode is
+        // used only for a second pass and its text must match before times escape.
+        params.set_no_timestamps(!enable_timestamps);
+        params.set_token_timestamps(false);
 
         // PERFORMANCE: Disable ALL whisper.cpp internal printing
         // This reduces C library log spam significantly
@@ -626,6 +677,7 @@ impl WhisperEngine {
         let mut result = String::new();
         let mut total_confidence = 0.0;
         let mut segment_count = 0;
+        let mut timestamp_segments = Vec::new();
 
         let num_segments = num_segments?;
         for i in 0..num_segments {
@@ -646,6 +698,13 @@ impl WhisperEngine {
 
             let cleaned_text = segment_text.trim();
             if !cleaned_text.is_empty() {
+                if enable_timestamps {
+                    timestamp_segments.push(WhisperSegmentTicks {
+                        text: cleaned_text.to_string(),
+                        start: state.full_get_segment_t0(i)?,
+                        end: state.full_get_segment_t1(i)?,
+                    });
+                }
                 if !result.is_empty() {
                     result.push(' ');
                 }
@@ -662,7 +721,7 @@ impl WhisperEngine {
             0.0
         };
 
-        Ok((cleaned_result, avg_confidence, is_partial))
+        Ok((cleaned_result, avg_confidence, is_partial, timestamp_segments))
     }
 
     pub async fn transcribe_audio(&self, audio_data: Vec<f32>, language: Option<String>) -> Result<String> {

@@ -11,6 +11,10 @@ use super::audio_processing::create_meeting_folder;
 use super::incremental_saver::IncrementalAudioSaver;
 use super::recording_state::AudioChunk;
 
+fn default_recording_timing_precision() -> super::transcription::provider::TimingPrecision {
+    super::transcription::provider::TimingPrecision::Approximate
+}
+
 /// Structured transcript segment for JSON export
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptSegment {
@@ -22,6 +26,54 @@ pub struct TranscriptSegment {
     pub display_time: String,  // Formatted time for display like "[02:15]"
     pub confidence: f32,
     pub sequence_id: u64,
+    #[serde(default)]
+    pub segment_index: u32,
+    #[serde(default = "default_recording_timing_precision")]
+    pub timing_precision: super::transcription::provider::TimingPrecision,
+}
+
+pub(crate) fn transcript_update_segments(
+    update: &super::transcription::worker::TranscriptUpdate,
+) -> Vec<TranscriptSegment> {
+    if update.timed_segments.is_empty() {
+        return vec![TranscriptSegment {
+            id: format!("seg_{}", update.sequence_id),
+            text: update.text.clone(),
+            audio_start_time: update.audio_start_time,
+            audio_end_time: update.audio_end_time,
+            duration: update.duration,
+            display_time: update.timestamp.clone(),
+            confidence: update.confidence,
+            sequence_id: update.sequence_id,
+            segment_index: 0,
+            timing_precision: super::transcription::provider::TimingPrecision::from_audio_bounds(
+                Some(update.audio_start_time),
+                Some(update.audio_end_time),
+            ),
+        }];
+    }
+
+    update
+        .timed_segments
+        .iter()
+        .enumerate()
+        .map(|(index, timed)| {
+            let start = timed.start_ms as f64 / 1000.0;
+            let end = timed.end_ms as f64 / 1000.0;
+            TranscriptSegment {
+                id: format!("seg_{}_{}", update.sequence_id, index),
+                text: timed.text.clone(),
+                audio_start_time: start,
+                audio_end_time: end,
+                duration: end - start,
+                display_time: update.timestamp.clone(),
+                confidence: update.confidence,
+                sequence_id: update.sequence_id,
+                segment_index: index as u32,
+                timing_precision: super::transcription::provider::TimingPrecision::Exact,
+            }
+        })
+        .collect()
 }
 
 /// Meeting metadata structure
@@ -112,7 +164,7 @@ impl RecordingSaver {
             // Check if segment with same sequence_id exists (update it)
             if let Some(existing) = segments
                 .iter_mut()
-                .find(|s| s.sequence_id == segment.sequence_id)
+            .find(|s| s.sequence_id == segment.sequence_id && s.segment_index == segment.segment_index)
             {
                 *existing = segment.clone();
                 info!(
@@ -157,6 +209,8 @@ impl RecordingSaver {
             display_time: "[00:00]".to_string(),
             confidence: 1.0,
             sequence_id: 0,
+            segment_index: 0,
+            timing_precision: super::transcription::provider::TimingPrecision::Unavailable,
         };
         self.add_transcript_segment(segment);
     }
@@ -239,8 +293,10 @@ impl RecordingSaver {
             .transcript_segments
             .lock()
             .map_err(|_| anyhow::anyhow!("Transcript history lock failed"))?;
-        let mut ids: std::collections::HashSet<u64> =
-            segments.iter().map(|s| s.sequence_id).collect();
+        let mut ids: std::collections::HashSet<(u64, u32)> = segments
+            .iter()
+            .map(|s| (s.sequence_id, s.segment_index))
+            .collect();
         for value in store.completed_results()? {
             if value
                 .get("text")
@@ -251,20 +307,13 @@ impl RecordingSaver {
             }
             let update: super::transcription::worker::TranscriptUpdate =
                 serde_json::from_value(value)?;
-            if ids.insert(update.sequence_id) {
-                segments.push(TranscriptSegment {
-                    id: format!("seg_{}", update.sequence_id),
-                    text: update.text,
-                    audio_start_time: update.audio_start_time,
-                    audio_end_time: update.audio_end_time,
-                    duration: update.duration,
-                    display_time: update.timestamp,
-                    confidence: update.confidence,
-                    sequence_id: update.sequence_id,
-                });
+            for segment in transcript_update_segments(&update) {
+                if ids.insert((segment.sequence_id, segment.segment_index)) {
+                    segments.push(segment);
+                }
             }
         }
-        segments.sort_by_key(|s| s.sequence_id);
+        segments.sort_by_key(|s| (s.sequence_id, s.segment_index));
         Ok(())
     }
 
@@ -595,10 +644,51 @@ mod history_tail_tests {
             display_time: "02:00".into(),
             confidence: 1.0,
             sequence_id: 2,
+            segment_index: 0,
+            timing_precision: super::super::transcription::provider::TimingPrecision::Approximate,
         };
         let mut history = history.lock().unwrap();
         history.push(segment);
         assert_eq!(history.last().unwrap().text, "最后一句行动项");
+    }
+
+    #[test]
+    fn verified_provider_times_become_individual_recording_segments() {
+        let update = super::super::transcription::worker::TranscriptUpdate {
+            text: "会议结论最后行动项".into(),
+            timestamp: "00:12".into(),
+            source: "Audio".into(),
+            sequence_id: 9,
+            chunk_start_time: 12.0,
+            is_partial: false,
+            confidence: 0.9,
+            audio_start_time: 12.0,
+            audio_end_time: 14.0,
+            duration: 2.0,
+            timing_precision: super::super::transcription::provider::TimingPrecision::Approximate,
+            timed_segments: vec![
+                super::super::transcription::provider::TimedText {
+                    text: "会议结论".into(),
+                    start_ms: 12_100,
+                    end_ms: 12_800,
+                },
+                super::super::transcription::provider::TimedText {
+                    text: "最后行动项".into(),
+                    start_ms: 13_000,
+                    end_ms: 13_900,
+                },
+            ],
+        };
+
+        let segments = transcript_update_segments(&update);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "会议结论");
+        assert_eq!(segments[1].text, "最后行动项");
+        assert_eq!(segments[1].audio_start_time, 13.0);
+        assert_eq!(segments[1].audio_end_time, 13.9);
+        assert_eq!(segments[1].timing_precision, super::super::transcription::provider::TimingPrecision::Exact);
+        assert_eq!(segments[0].sequence_id, segments[1].sequence_id);
+        assert_ne!(segments[0].segment_index, segments[1].segment_index);
     }
     #[test]
     fn final_no_audio_save_persists_detached_tail_and_error_status() {
@@ -631,6 +721,8 @@ mod history_tail_tests {
             display_time: "00:01".into(),
             confidence: 1.0,
             sequence_id: 7,
+            segment_index: 0,
+            timing_precision: super::super::transcription::provider::TimingPrecision::Approximate,
         });
         saver.set_capture_error(Some("No recovery audio".into()));
         saver.persist_final_documents(Some(2.0)).unwrap();
@@ -690,6 +782,7 @@ mod history_tail_tests {
             audio_end_time: 120.1,
             duration: 0.1,
             timing_precision: super::super::transcription::provider::TimingPrecision::Approximate,
+            timed_segments: Vec::new(),
         };
         receiver
             .store()

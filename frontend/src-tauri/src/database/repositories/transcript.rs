@@ -7,6 +7,15 @@ use uuid::Uuid;
 
 pub struct TranscriptsRepository;
 
+fn segment_timing_precision(segment: &TranscriptSegment) -> &'static str {
+    match segment.timing_precision.as_deref() {
+        Some("exact") if TimingPrecision::from_audio_bounds(segment.audio_start_time, segment.audio_end_time) != TimingPrecision::Unavailable => "exact",
+        Some("approximate") => "approximate",
+        Some("unavailable") => "unavailable",
+        _ => TimingPrecision::from_audio_bounds(segment.audio_start_time, segment.audio_end_time).as_str(),
+    }
+}
+
 impl TranscriptsRepository {
     /// Saves a new meeting and its associated transcript segments.
     /// This function uses a transaction to ensure that either both the meeting
@@ -77,7 +86,7 @@ impl TranscriptsRepository {
             .bind(segment.audio_start_time)
             .bind(segment.audio_end_time)
             .bind(segment.duration)
-            .bind(TimingPrecision::from_audio_bounds(segment.audio_start_time, segment.audio_end_time).as_str())
+            .bind(segment_timing_precision(segment))
             .execute(&mut *transaction)
             .await;
 

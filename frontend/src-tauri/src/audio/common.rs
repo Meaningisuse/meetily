@@ -1,4 +1,5 @@
 use crate::api::TranscriptSegment;
+use crate::audio::transcription::TimingPrecision;
 use anyhow::Result;
 use log::{debug, info};
 use once_cell::sync::Lazy;
@@ -46,26 +47,75 @@ pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
     }
 }
 
-/// Create transcript segments from transcription results.
-/// Each tuple is (text, start_ms, end_ms) from VAD timestamps.
-pub(crate) fn create_transcript_segments(transcripts: &[(String, f64, f64)]) -> Vec<TranscriptSegment> {
+#[derive(Debug, Clone)]
+pub(crate) struct TranscriptInput {
+    pub text: String,
+    pub start_ms: f64,
+    pub end_ms: f64,
+    pub timing_precision: TimingPrecision,
+}
+
+impl From<(String, f64, f64)> for TranscriptInput {
+    fn from((text, start_ms, end_ms): (String, f64, f64)) -> Self {
+        Self {
+            text,
+            start_ms,
+            end_ms,
+            timing_precision: TimingPrecision::from_audio_bounds(
+                Some(start_ms / 1000.0),
+                Some(end_ms / 1000.0),
+            ),
+        }
+    }
+}
+
+/// Create transcript rows while preserving whether their bounds came from the
+/// provider or only from the enclosing VAD chunk.
+pub(crate) fn create_transcript_segments<T>(transcripts: &[T]) -> Vec<TranscriptSegment>
+where
+    T: Clone + Into<TranscriptInput>,
+{
     transcripts
         .iter()
-        .map(|(text, start_ms, end_ms)| {
-            let start_seconds = start_ms / 1000.0;
-            let end_seconds = end_ms / 1000.0;
+        .cloned()
+        .map(Into::into)
+        .map(|segment| {
+            let start_seconds = segment.start_ms / 1000.0;
+            let end_seconds = segment.end_ms / 1000.0;
             let duration = end_seconds - start_seconds;
 
             TranscriptSegment {
                 id: format!("transcript-{}", Uuid::new_v4()),
-                text: text.trim().to_string(),
+                text: segment.text.trim().to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 audio_start_time: Some(start_seconds),
                 audio_end_time: Some(end_seconds),
                 duration: Some(duration),
+                timing_precision: Some(segment.timing_precision.as_str().to_string()),
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod timed_transcript_tests {
+    use super::{create_transcript_segments, TranscriptInput};
+    use crate::audio::transcription::TimingPrecision;
+
+    #[test]
+    fn provider_precision_survives_segment_construction() {
+        let segments = create_transcript_segments(&[TranscriptInput {
+            text: "尾句".into(),
+            start_ms: 1250.0,
+            end_ms: 1800.0,
+            timing_precision: TimingPrecision::Exact,
+        }]);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].audio_start_time, Some(1.25));
+        assert_eq!(segments[0].audio_end_time, Some(1.8));
+        assert_eq!(segments[0].timing_precision.as_deref(), Some("exact"));
+    }
 }
 
 /// Write transcripts.json to a meeting folder (atomic write with temp file)
@@ -85,6 +135,7 @@ pub(crate) fn write_transcripts_json(folder: &Path, segments: &[TranscriptSegmen
                 "audio_start_time": s.audio_start_time,
                 "audio_end_time": s.audio_end_time,
                 "duration": s.duration,
+                "timing_precision": s.timing_precision,
                 "sequence_id": i
             })
         }).collect::<Vec<_>>()

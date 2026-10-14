@@ -3,7 +3,7 @@
 // Parallel transcription worker pool and chunk processing logic.
 
 use super::engine::TranscriptionEngine;
-use super::provider::{TimingPrecision, TranscriptionError};
+use super::provider::{TimedText, TimingPrecision, TranscriptionError};
 use crate::audio::AudioChunk;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,8 @@ pub struct TranscriptUpdate {
     pub duration: f64,          // Segment duration in seconds (e.g., 3.3)
     #[serde(default)]
     pub timing_precision: TimingPrecision,
+    #[serde(default)]
+    pub timed_segments: Vec<TimedText>,
 }
 
 // NOTE: get_transcript_history and get_recording_meeting_name functions
@@ -178,7 +180,7 @@ pub fn start_transcription_task<R: Runtime>(
                             )
                             .await
                             {
-                                Ok((transcript, confidence_opt, is_partial)) => {
+                                Ok((transcript, confidence_opt, is_partial, timed_segments, provider_precision)) => {
                                     if is_partial {TRANSCRIPTION_INCOMPLETE.store(true,Ordering::SeqCst);}
                                     let confidence_str = match confidence_opt {
                                         Some(c) => format!("{:.2}", c),
@@ -240,6 +242,16 @@ pub fn start_transcription_task<R: Runtime>(
                                                 Some(audio_start_time),
                                                 Some(audio_end_time),
                                             ),
+                                            timed_segments: if provider_precision == TimingPrecision::Exact {
+                                                let offset_ms = (chunk_timestamp * 1000.0).round() as i64;
+                                                timed_segments.into_iter().map(|mut timed| {
+                                                    timed.start_ms = timed.start_ms.saturating_add(offset_ms);
+                                                    timed.end_ms = timed.end_ms.saturating_add(offset_ms);
+                                                    timed
+                                                }).collect()
+                                            } else {
+                                                Vec::new()
+                                            },
                                         };
 
                                         if let Some(store)=&catchup_store {
@@ -275,6 +287,7 @@ pub fn start_transcription_task<R: Runtime>(
                                                 Some(chunk_timestamp),
                                                 Some(audio_end_time),
                                             ),
+                                            timed_segments: Vec::new(),
                                         };
                                         let _=store.complete(chunk_id,&serde_json::to_value(update).unwrap());
                                     }
@@ -456,12 +469,12 @@ pub fn start_transcription_task<R: Runtime>(
 }
 
 /// Transcribe audio chunk using the appropriate provider (Whisper, Parakeet, or trait-based)
-/// Returns: (text, confidence Option, is_partial)
+/// Returns text/confidence/partial state plus verified provider timing, if present.
 pub(crate) async fn transcribe_chunk_with_provider<R: Runtime>(
     engine: &TranscriptionEngine,
     chunk: AudioChunk,
     app: &AppHandle<R>,
-) -> std::result::Result<(String, Option<f32>, bool), TranscriptionError> {
+) -> std::result::Result<(String, Option<f32>, bool, Vec<TimedText>, TimingPrecision), TranscriptionError> {
     // Convert to 16kHz mono for transcription
     let transcription_data = if chunk.sample_rate != 16000 {
         crate::audio::audio_processing::resample_audio(&chunk.data, chunk.sample_rate, 16000)
@@ -501,13 +514,13 @@ pub(crate) async fn transcribe_chunk_with_provider<R: Runtime>(
             let language = crate::get_language_preference_internal();
 
             match whisper_engine
-                .transcribe_audio_with_confidence(speech_samples, language)
+                .transcribe_audio_with_verified_timing(speech_samples, language)
                 .await
             {
-                Ok((text, confidence, is_partial)) => {
+                Ok((text, confidence, is_partial, timed_segments, timing_precision)) => {
                     let cleaned_text = text.trim().to_string();
                     if cleaned_text.is_empty() {
-                        return Ok((String::new(), Some(confidence), is_partial));
+                        return Ok((String::new(), Some(confidence), is_partial, Vec::new(), TimingPrecision::Unavailable));
                     }
 
                     info!(
@@ -515,7 +528,7 @@ pub(crate) async fn transcribe_chunk_with_provider<R: Runtime>(
                         chunk.chunk_id, cleaned_text, confidence, is_partial
                     );
 
-                    Ok((cleaned_text, Some(confidence), is_partial))
+                    Ok((cleaned_text, Some(confidence), is_partial, timed_segments, timing_precision))
                 }
                 Err(e) => {
                     error!(
@@ -543,7 +556,7 @@ pub(crate) async fn transcribe_chunk_with_provider<R: Runtime>(
                 Ok(text) => {
                     let cleaned_text = text.trim().to_string();
                     if cleaned_text.is_empty() {
-                        return Ok((String::new(), None, false));
+                        return Ok((String::new(), None, false, Vec::new(), TimingPrecision::Unavailable));
                     }
 
                     info!(
@@ -552,7 +565,7 @@ pub(crate) async fn transcribe_chunk_with_provider<R: Runtime>(
                     );
 
                     // Parakeet doesn't provide confidence or partial results
-                    Ok((cleaned_text, None, false))
+                    Ok((cleaned_text, None, false, Vec::new(), TimingPrecision::Unavailable))
                 }
                 Err(e) => {
                     error!(
@@ -583,7 +596,7 @@ pub(crate) async fn transcribe_chunk_with_provider<R: Runtime>(
                 Ok(result) => {
                     let cleaned_text = result.text.trim().to_string();
                     if cleaned_text.is_empty() {
-                        return Ok((String::new(), result.confidence, result.is_partial));
+                        return Ok((String::new(), result.confidence, result.is_partial, Vec::new(), TimingPrecision::Unavailable));
                     }
 
                     let confidence_str = match result.confidence {
@@ -600,7 +613,7 @@ pub(crate) async fn transcribe_chunk_with_provider<R: Runtime>(
                         result.is_partial
                     );
 
-                    Ok((cleaned_text, result.confidence, result.is_partial))
+                    Ok((cleaned_text, result.confidence, result.is_partial, result.timed_segments, result.timing_precision))
                 }
                 Err(e) => {
                     error!(

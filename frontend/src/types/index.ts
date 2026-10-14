@@ -2,6 +2,12 @@ import type { JobSnapshot } from './enhancement';
 
 export type TimingPrecision = 'exact' | 'approximate' | 'unavailable';
 
+export interface TimedText {
+  text: string;
+  start_ms: number;
+  end_ms: number;
+}
+
 export interface Message {
   id: string;
   content: string;
@@ -21,6 +27,7 @@ export interface Transcript {
   audio_end_time?: number;   // Seconds from recording start (e.g., 128.6)
   duration?: number;          // Segment duration in seconds (e.g., 3.3)
   timing_precision?: TimingPrecision;
+  timed_segments?: TimedText[];
 }
 
 export interface TranscriptUpdate {
@@ -36,6 +43,7 @@ export interface TranscriptUpdate {
   audio_end_time: number;   // Seconds from recording start
   duration: number;          // Segment duration in seconds
   timing_precision?: TimingPrecision;
+  timed_segments?: TimedText[];
 }
 
 export interface Block {
