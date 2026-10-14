@@ -2,6 +2,7 @@
 use super::{
     transcription::{
         engine,
+        provider::TimingPrecision,
         worker::{transcribe_chunk_with_provider, TranscriptUpdate},
     },
     work_queue::AudioWorkReceiver,
@@ -80,6 +81,10 @@ pub async fn recover_transcription_backlog(
                 audio_start_time: start,
                 audio_end_time: start + duration,
                 duration,
+                timing_precision: TimingPrecision::from_audio_bounds(
+                    Some(start),
+                    Some(start + duration),
+                ),
             };
             store
                 .complete(

@@ -315,7 +315,13 @@ async fn pagination_is_stable_and_search_is_bounded() {
         .unwrap();
     assert_eq!(second.items[0].id, "b");
     for i in 0..251 {
-        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time,audio_end_time) VALUES(?, 'b', ?, '10:00', ?, ?)").bind(format!("seg{i:03}")).bind(if i==250{"最后行动项 100%_literal".to_string()}else{"中文".repeat(200)}).bind(if i<250{Some((i/2) as f64)}else{None}).bind(if i<250{Some((i/2) as f64+1.0)}else{None}).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time,audio_end_time,timing_precision) VALUES(?, 'b', ?, '10:00', ?, ?, ?)")
+            .bind(format!("seg{i:03}"))
+            .bind(if i==250{"最后行动项 100%_literal".to_string()}else{"中文".repeat(200)})
+            .bind(if i<250{Some((i/2) as f64)}else{None})
+            .bind(if i<250{Some((i/2) as f64+1.0)}else{None})
+            .bind(if i<250 {"approximate"} else {"unavailable"})
+            .execute(&pool).await.unwrap();
     }
     let mut cursor = None;
     let mut ids = Vec::new();
@@ -330,6 +336,9 @@ async fn pagination_is_stable_and_search_is_bounded() {
             )
             .await
             .unwrap();
+        if ids.is_empty() {
+            assert_eq!(page.items[0].timing_precision, "approximate");
+        }
         ids.extend(page.items.iter().map(|s| s.id.clone()));
         cursor = page.next_cursor;
         if cursor.is_none() {

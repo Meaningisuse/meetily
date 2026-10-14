@@ -14,6 +14,7 @@ pub struct DocumentSegment {
     pub text: String,
     pub start_ms: Option<i64>,
     pub end_ms: Option<i64>,
+    pub timing_precision: String,
     pub speaker_id: Option<String>,
     pub speaker_name: Option<String>,
     pub assignment: String,

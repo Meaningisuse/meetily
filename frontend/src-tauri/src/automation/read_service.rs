@@ -32,6 +32,7 @@ pub struct TranscriptItem {
     pub text: String,
     pub start_ms: Option<i64>,
     pub end_ms: Option<i64>,
+    pub timing_precision: String,
     pub speaker: Option<String>,
 }
 
@@ -151,11 +152,11 @@ impl MeetingReadService {
         let versions: SourceVersions=sqlx::query_as("SELECT revision,transcript_revision,speaker_revision,summary_revision,notes_revision FROM meeting_content_versions WHERE meeting_id=?").bind(meeting_id).fetch_optional(&self.pool).await?.unwrap_or_default();
         let cursor: Option<Cursor> = Self::decode(&request.cursor)?;
         let rows=match cursor {
-            Some(Cursor::Transcript{revision,start,timestamp,id}) if revision==versions.transcript_revision=>sqlx::query("SELECT id,transcript,audio_start_time,audio_end_time,speaker,timestamp FROM transcripts WHERE meeting_id=? AND ((audio_start_time IS NULL) > ? OR ((audio_start_time IS NULL)=? AND (audio_start_time > ? OR (audio_start_time IS ? AND (timestamp > ? OR (timestamp = ? AND id > ?)))))) ORDER BY audio_start_time IS NULL,audio_start_time,timestamp,id LIMIT ?")
+            Some(Cursor::Transcript{revision,start,timestamp,id}) if revision==versions.transcript_revision=>sqlx::query("SELECT id,transcript,audio_start_time,audio_end_time,speaker,timestamp,timing_precision FROM transcripts WHERE meeting_id=? AND ((audio_start_time IS NULL) > ? OR ((audio_start_time IS NULL)=? AND (audio_start_time > ? OR (audio_start_time IS ? AND (timestamp > ? OR (timestamp = ? AND id > ?)))))) ORDER BY audio_start_time IS NULL,audio_start_time,timestamp,id LIMIT ?")
                 .bind(meeting_id).bind(start.is_none()).bind(start.is_none()).bind(start).bind(start).bind(timestamp.clone()).bind(timestamp).bind(id).bind((limit+1) as i64).fetch_all(&self.pool).await?,
             Some(Cursor::Transcript{..})=>return Err(EnhancementError::conflict()),
             Some(_)=>return Err(EnhancementError::invalid("cursor does not match transcript")),
-            None=>sqlx::query("SELECT id,transcript,audio_start_time,audio_end_time,speaker,timestamp FROM transcripts WHERE meeting_id=? ORDER BY audio_start_time IS NULL,audio_start_time,timestamp,id LIMIT ?").bind(meeting_id).bind((limit+1) as i64).fetch_all(&self.pool).await?,
+            None=>sqlx::query("SELECT id,transcript,audio_start_time,audio_end_time,speaker,timestamp,timing_precision FROM transcripts WHERE meeting_id=? ORDER BY audio_start_time IS NULL,audio_start_time,timestamp,id LIMIT ?").bind(meeting_id).bind((limit+1) as i64).fetch_all(&self.pool).await?,
         };
         let more = rows.len() > limit;
         let next_cursor = if more {
@@ -184,6 +185,7 @@ impl MeetingReadService {
                 end_ms: r
                     .get::<Option<f64>, _>("audio_end_time")
                     .map(|v| (v * 1000.0).round() as i64),
+                timing_precision: r.get("timing_precision"),
                 speaker: r.get("speaker"),
             })
             .collect();

@@ -39,6 +39,7 @@ async fn snapshot_reads_all_pages_and_legacy_content() {
     for segment in &document.transcript {
         assert_eq!(segment.start_ms, None);
         assert_eq!(segment.end_ms, None);
+        assert_eq!(segment.timing_precision, "unavailable");
         assert_eq!(segment.speaker_id, None);
         assert_eq!(segment.speaker_name, None);
         assert_eq!(segment.assignment, "unknown");
@@ -112,6 +113,7 @@ async fn enhancement_migrations_preserve_existing_rows() {
     }
     seed(&pool, "upgrade").await;
     sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time,audio_end_time) VALUES('tail','upgrade','尾段','old',1.25,2.5)").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES('untimed','upgrade','无时间','old')").execute(&pool).await.unwrap();
     sqlx::query(
         "INSERT INTO meeting_notes VALUES('upgrade','笔记','{\"private\":true}','old','old')",
     )
@@ -124,6 +126,24 @@ async fn enhancement_migrations_preserve_existing_rows() {
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261014000450_add_transcript_timing.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let precision: String =
+        sqlx::query_scalar("SELECT timing_precision FROM transcripts WHERE id='tail'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(precision, "approximate");
+    let precision: String =
+        sqlx::query_scalar("SELECT timing_precision FROM transcripts WHERE id='untimed'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(precision, "unavailable");
     let document = MeetingDocumentService::new(pool.clone())
         .snapshot("upgrade")
         .await
@@ -132,6 +152,7 @@ async fn enhancement_migrations_preserve_existing_rows() {
     assert_eq!(document.transcript[0].text, "尾段");
     assert_eq!(document.transcript[0].start_ms, Some(1250));
     assert_eq!(document.transcript[0].end_ms, Some(2500));
+    assert_eq!(document.transcript[0].timing_precision, "approximate");
     assert_eq!(document.notes_markdown.as_deref(), Some("笔记"));
     assert_eq!(
         sqlx::query_scalar::<_, String>("SELECT notes_json FROM meeting_notes")
@@ -214,7 +235,7 @@ async fn transcript_completion_event_is_atomic_with_transcript_persistence() {
     let event_rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT kind,revision FROM automation_events WHERE meeting_id=? ORDER BY rowid",
     )
-    .bind(meeting_id)
+    .bind(&meeting_id)
     .fetch_all(&pool)
     .await
     .unwrap();
@@ -225,6 +246,14 @@ async fn transcript_completion_event_is_atomic_with_transcript_persistence() {
             ("recording.stopped".into(), 1),
         ]
     );
+    let precision: String = sqlx::query_scalar(
+        "SELECT timing_precision FROM transcripts WHERE meeting_id=?",
+    )
+    .bind(&meeting_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(precision, "approximate");
 }
 
 #[tokio::test]
@@ -290,7 +319,7 @@ async fn rust_snapshot_matches_public_json_contract() {
         .await
         .unwrap();
     let golden: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/meeting-document-v1.json"
+        "../../../tests/fixtures/meeting-document-v2.json"
     ))
     .unwrap();
     assert_eq!(serde_json::to_value(document).unwrap(), golden);

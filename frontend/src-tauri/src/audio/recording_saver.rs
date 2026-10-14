@@ -689,6 +689,7 @@ mod history_tail_tests {
             audio_start_time: 120.0,
             audio_end_time: 120.1,
             duration: 0.1,
+            timing_precision: super::super::transcription::provider::TimingPrecision::Approximate,
         };
         receiver
             .store()

@@ -51,11 +51,12 @@
 
 - [x] 写 `audio::time_map::tests::vad_gap_maps_to_original_clock`：原0–1s和10–11s拼为2s，第二packed1–2s必须映为原10–11s，跨区间拆分。
 - [x] 写 `audio::time_map::tests::resampling_does_not_accumulate_drift`：44.1/48k输入→16k，120分钟末尾偏差≤20ms；不用墙钟推导时长。
-- [ ] 写 `transcription::tests::unavailable_timing_remains_unknown` 和真实timestamp engine fixture：Parakeet无时间不切字猜时间；Whisper开启timestamps后不能漏已有中文尾句。
+- [x] 写 `transcription::tests::unavailable_timing_remains_unknown`：provider没有时间时保持unknown，不伪造片段。
+- [ ] 真实timestamp engine fixture：Parakeet无时间不切字猜时间；Whisper开启timestamps后不能漏已有中文尾句。
 - [ ] 先跑Rust filter，确认失败后实现映射贯穿实时/导入/重转写；provider时间精度按设计的transcripts.timing_precision落库，对旧时间标approximate，不误称exact。
 - [ ] 三入口同样本核对试听定位，提交 `feat: preserve source audio timing through transcription`。若D1证明必须forced alignment，单列新增aligner模块、测试和性能验收后再开放精确归属。
 
-**2026-10-14 implementation note:** The tested `audio::time_map` arithmetic foundation is committed independently. Provider `TimedText` propagation, precision persistence/migration, Chinese-tail model regression, and three-entry playback verification remain unchecked; see [`docs/DIARIZATION_SPIKE_RESULTS.md`](../../DIARIZATION_SPIKE_RESULTS.md#d2-timing-status-2026-10-14). Do not treat D2 as complete or enable exact word timing until those checks pass.
+**2026-10-14 implementation note:** The tested `audio::time_map` arithmetic foundation is committed independently. D2 now defines `TimedText` and `TimingPrecision`; providers with no timing return `unavailable` and no fabricated segments. Migration and read/write DTO paths persist coarse VAD/chunk bounds as `approximate`, backfill old rows with bounds as approximate, and leave missing bounds unavailable. The schema-2 meeting document contract is covered by a new golden fixture. Provider exact-time propagation, Chinese-tail model regression, and three-entry playback verification remain incomplete; see [`docs/DIARIZATION_SPIKE_RESULTS.md`](../../DIARIZATION_SPIKE_RESULTS.md#d2-timing-status-2026-10-14). Do not enable exact word timing until those checks pass.
 
 ## Task D3：版本化run和批处理engine
 

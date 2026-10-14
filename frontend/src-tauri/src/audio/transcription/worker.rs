@@ -3,7 +3,7 @@
 // Parallel transcription worker pool and chunk processing logic.
 
 use super::engine::TranscriptionEngine;
-use super::provider::TranscriptionError;
+use super::provider::{TimingPrecision, TranscriptionError};
 use crate::audio::AudioChunk;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,8 @@ pub struct TranscriptUpdate {
     pub audio_start_time: f64, // Seconds from recording start (e.g., 125.3)
     pub audio_end_time: f64,   // Seconds from recording start (e.g., 128.6)
     pub duration: f64,          // Segment duration in seconds (e.g., 3.3)
+    #[serde(default)]
+    pub timing_precision: TimingPrecision,
 }
 
 // NOTE: get_transcript_history and get_recording_meeting_name functions
@@ -234,6 +236,10 @@ pub fn start_transcription_task<R: Runtime>(
                                             audio_start_time,
                                             audio_end_time,
                                             duration: chunk_duration,
+                                            timing_precision: TimingPrecision::from_audio_bounds(
+                                                Some(audio_start_time),
+                                                Some(audio_end_time),
+                                            ),
                                         };
 
                                         if let Some(store)=&catchup_store {
@@ -253,7 +259,23 @@ pub fn start_transcription_task<R: Runtime>(
                                         // PERFORMANCE: Removed verbose logging of every emission
                                     } else if let Some(store)=&catchup_store {
                                         if is_partial{chunks_completed_clone.fetch_add(1,Ordering::SeqCst);continue;}
-                                        let update=TranscriptUpdate {text:String::new(),timestamp:format_current_timestamp(),source:"Audio".into(),sequence_id:chunk_id,chunk_start_time:chunk_timestamp,is_partial:false,confidence:confidence_opt.unwrap_or(1.0),audio_start_time:chunk_timestamp,audio_end_time:chunk_timestamp+chunk_duration,duration:chunk_duration};
+                                        let audio_end_time = chunk_timestamp + chunk_duration;
+                                        let update = TranscriptUpdate {
+                                            text: String::new(),
+                                            timestamp: format_current_timestamp(),
+                                            source: "Audio".into(),
+                                            sequence_id: chunk_id,
+                                            chunk_start_time: chunk_timestamp,
+                                            is_partial: false,
+                                            confidence: confidence_opt.unwrap_or(1.0),
+                                            audio_start_time: chunk_timestamp,
+                                            audio_end_time,
+                                            duration: chunk_duration,
+                                            timing_precision: TimingPrecision::from_audio_bounds(
+                                                Some(chunk_timestamp),
+                                                Some(audio_end_time),
+                                            ),
+                                        };
                                         let _=store.complete(chunk_id,&serde_json::to_value(update).unwrap());
                                     }
                                 }

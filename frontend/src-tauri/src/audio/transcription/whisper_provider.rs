@@ -29,11 +29,11 @@ impl TranscriptionProvider for WhisperProvider {
             .transcribe_audio_with_confidence(audio, language)
             .await
         {
-            Ok((text, confidence, is_partial)) => Ok(TranscriptResult {
-                text: text.trim().to_string(),
-                confidence: Some(confidence),
+            Ok((text, confidence, is_partial)) => Ok(TranscriptResult::unavailable(
+                text.trim().to_string(),
+                Some(confidence),
                 is_partial,
-            }),
+            )),
             Err(e) => Err(TranscriptionError::EngineFailed(e.to_string())),
         }
     }

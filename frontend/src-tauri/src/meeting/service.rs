@@ -57,7 +57,7 @@ impl MeetingDocumentService {
                     .get::<Option<i64>, _>("summary_source_speaker_revision")
                     .is_some_and(|revision| revision != versions.speaker_revision)
         });
-        let rows = sqlx::query("SELECT id,transcript,audio_start_time,audio_end_time FROM transcripts WHERE meeting_id=? ORDER BY audio_start_time IS NULL, audio_start_time, timestamp, id").bind(id).fetch_all(&mut *tx).await?;
+        let rows = sqlx::query("SELECT id,transcript,audio_start_time,audio_end_time,timing_precision FROM transcripts WHERE meeting_id=? ORDER BY audio_start_time IS NULL, audio_start_time, timestamp, id").bind(id).fetch_all(&mut *tx).await?;
         let transcript = rows
             .into_iter()
             .map(|row| {
@@ -72,6 +72,7 @@ impl MeetingDocumentService {
                     text: row.get("transcript"),
                     start_ms: start,
                     end_ms: end,
+                    timing_precision: row.get("timing_precision"),
                     speaker_id: None,
                     speaker_name: None,
                     assignment: "unknown".into(),
@@ -88,7 +89,7 @@ impl MeetingDocumentService {
             })
             .unwrap_or(created_at);
         Ok(MeetingDocument {
-            schema_version: 1,
+            schema_version: 2,
             meeting_id: id.into(),
             title: meeting.get("title"),
             created_at,
