@@ -95,3 +95,5 @@ D1 数据准备已验证，但模型门禁未通过。`prepare_alimeeting_test.p
 D2的时间映射、精度持久化及Whisper双解码保护已提交；末尾标点差异不再误判为文本缺失，英文单词边界仍需一致。录音、catch-up、导入、重转写路径都传递精确分段或保守降级。
 
 追加验证：Rust全量326通过、0失败、4忽略；手工启用的模型测试以本机生成中文TTS和多语言tiny模型在CPU及Apple M5 Metal路径运行通过，两次解码保留同一尾句，只差末尾句号。JFK Metal烟测也通过。另以AliMeeting公开音频在CPU上运行首个120秒片段和8个30秒高语音占比片段，tiny模型9/9双解码测试完成，但canonical与带时间戳解码文本均不一致，安全返回`Unavailable`；同一30秒片段改用base模型也返回`Unavailable`。没有得到可评分的精确时间；符合回退合同，不算真实定位通过。模型把“会议纪要”误识，故不能据此声称识别质量；模型时间没有独立标注对照。之前标准Metal加载测试在受限沙箱内因`MTLCreateSystemDefaultDevice()`返回nil而SIGSEGV；沙箱外可见Apple M5并已完成Metal模型加载和推理。精确时间对照、双次解码真实性能和三入口试听仍待验收，D2及P4阶段均未完成。
+
+P4候选后续验证：在临时目录构建 MIT moss-transcribe.cpp（source `190a569c`，ggml `eced84c8`）并启用 Apple M5 Metal；CTest 5通过、0失败、9跳过（缺模型基线）。从 Apache-2.0 公共 GGUF 仓库下载 q8_0 权重并校验 SHA-256。30秒开发裁片生成11段/4人，DER 0.51%、overlap DER 0.47%，整条进程耗时5.19秒（含加载），峰值RSS 1.27 GB；但推理后在Metal residency-set清理处断言退出134。34.442分钟样本在37.73秒尝试分配45,659 MiB失败，峰值RSS 2.91 GB、退出139且无输出。该实现不能通过长录音或稳定运行门禁；D1继续NO-GO，D3–D5不进入。
