@@ -5,10 +5,10 @@ import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 
 interface UseModelConfigurationProps {
-  serverAddress: string | null;
+  nativeReady: boolean;
 }
 
-export function useModelConfiguration({ serverAddress }: UseModelConfigurationProps) {
+export function useModelConfiguration({ nativeReady }: UseModelConfigurationProps) {
   // Note: No hardcoded defaults - DB is the source of truth
   const [modelConfig, setModelConfig] = useState<ModelConfig>({
     provider: 'ollama',
@@ -18,7 +18,7 @@ export function useModelConfiguration({ serverAddress }: UseModelConfigurationPr
   const [isLoading, setIsLoading] = useState(true);
   const [, setError] = useState<string>('');
 
-  // Fetch model configuration on mount and when serverAddress changes
+  // Fetch model configuration on mount and when nativeReady changes
   useEffect(() => {
     const fetchModelConfig = async () => {
       setIsLoading(true);
@@ -82,8 +82,8 @@ export function useModelConfiguration({ serverAddress }: UseModelConfigurationPr
       }
     };
 
-    fetchModelConfig();
-  }, [serverAddress]);
+    if (nativeReady) void fetchModelConfig();
+  }, [nativeReady]);
 
   // Listen for model config updates from other components
   useEffect(() => {

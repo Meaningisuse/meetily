@@ -4,6 +4,8 @@ use sqlx::FromRow;
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct MeetingModel {
+    #[sqlx(default)]
+    pub revision: i64,
     pub id: String,
     pub title: String,
     pub created_at: DateTimeUtc,
@@ -39,6 +41,8 @@ pub struct Transcript {
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct SummaryProcess {
+    #[sqlx(default)]
+    pub content_revision: Option<i64>,
     pub meeting_id: String,
     pub status: String,
     pub created_at: chrono::DateTime<chrono::Utc>,

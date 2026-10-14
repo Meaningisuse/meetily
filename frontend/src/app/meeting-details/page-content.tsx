@@ -2,7 +2,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { MeetingSummary, SummaryProcessResponse } from '@/types';
-import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
@@ -68,13 +67,12 @@ export default function PageContent({
   const autoGenerationStartedMeetingIdRef = useRef<string | null>(null);
 
   // Sidebar context
-  const { serverAddress } = useSidebar();
 
   // Get model config from ConfigContext
   const { modelConfig, setModelConfig, isModelConfigLoading } = useConfig();
 
   // Custom hooks
-  const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
+  const meetingData = useMeetingData({ meeting, summaryData, summaryRevision: initialSummary?.revision, onMeetingUpdated });
   const templates = useTemplates();
 
   // Callback to register the modal open function
@@ -126,6 +124,7 @@ export default function PageContent({
     onMeetingUpdated,
     updateMeetingTitle: meetingData.updateMeetingTitle,
     setAiSummary: meetingData.setAiSummary,
+    setSourceRevision: meetingData.setSourceRevision,
     onOpenModelSettings: handleOpenModelSettings,
   });
 

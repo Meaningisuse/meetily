@@ -44,7 +44,13 @@ const transcriptPage = {
 };
 let savedSummary: SummaryProcessResponse;
 const invoke = mock(async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
+  if (command === 'api_native_ready') return true;
   if (command === 'api_get_meetings') return [];
+  if (command === 'api_save_meeting_summary') {
+    if (args!.expectedRevision !== savedSummary.revision) throw new Error('CONFLICT: content changed');
+    savedSummary = { ...savedSummary, revision: savedSummary.revision! + 1, data: args!.summary };
+    return { revision: savedSummary.revision };
+  }
   if (command === 'api_get_summary') return { ...savedSummary, meeting_id: args!.meetingId };
   if (command === 'api_get_meeting_metadata') return readMetadata(args!.meetingId as string);
   if (command === 'api_get_meeting_transcripts') return readTranscripts(args!.meetingId as string);
@@ -58,15 +64,17 @@ const { useSummaryGeneration } = await import('../../src/hooks/meeting-details/u
 const { useMeetingData } = await import('../../src/hooks/meeting-details/useMeetingData');
 
 // Use a lightweight content view around the actual route, transcript loader, state hooks and polling provider.
+let editorState: ReturnType<typeof useMeetingData>;
 let summaryState: ReturnType<typeof useSummaryGeneration>;
 let refresh: () => Promise<void>;
 let mounts = 0;
 function SummaryView(props: any) {
-  const data = useMeetingData(props);
+  const data = useMeetingData({ ...props, summaryRevision: props.initialSummary?.revision });
+  editorState = data;
   summaryState = useSummaryGeneration({
     meeting: props.meeting, initialSummary: props.initialSummary, transcripts: data.transcripts,
     modelConfig: { provider: 'ollama', model: 'test', whisperModel: 'base' }, isModelConfigLoading: false,
-    selectedTemplate: 'daily_standup', setAiSummary: data.setAiSummary, updateMeetingTitle: data.updateMeetingTitle,
+    selectedTemplate: 'daily_standup', setAiSummary: data.setAiSummary, setSourceRevision: data.setSourceRevision, updateMeetingTitle: data.updateMeetingTitle,
   });
   refresh = props.onRefetchTranscripts;
   useEffect(() => { mounts += 1; }, []);
@@ -84,7 +92,7 @@ beforeEach(() => {
   selectedMeeting = 'meeting-a';
   readMetadata = async id => metadata(id);
   readTranscripts = async () => transcriptPage;
-  savedSummary = { meeting_id: selectedMeeting, status: 'pending', start: 'attempt-a', end: null, data: null, error: null, meetingName: 'Meeting A' };
+  savedSummary = { revision: 0, meeting_id: selectedMeeting, status: 'pending', start: 'attempt-a', end: null, data: null, error: null, meetingName: 'Meeting A' };
   mounts = 0; timers.clear(); invoke.mockClear(); notify.mockClear();
   globalThis.setInterval = ((callback: () => Promise<void>) => {
     const id = ++nextTimer; timers.set(id, callback); return id;
@@ -170,4 +178,18 @@ describe('meeting route transcript refresh', () => {
     expect(invoke.mock.calls.find(([command]) => command === 'api_cancel_summary')?.[1]?.processId).toBe('attempt-b');
     expect(timers.size).toBe(0);
   });
+});
+
+
+test('editor saves the viewed revision, advances on success, and preserves edits on conflict', async () => {
+  savedSummary = { ...savedSummary, status: 'completed', data: { markdown: 'Saved original' } };
+  await show();
+  await act(async () => { await editorState.handleSaveSummary({ markdown: 'My edit' }); });
+  expect(invoke.mock.calls.filter(call => call[0] === 'api_save_meeting_summary')[0][1]!.expectedRevision).toBe(0);
+  expect(savedSummary.revision).toBe(1);
+  savedSummary = { ...savedSummary, revision: 2, data: { markdown: 'Other editor' } };
+  await expect(editorState.handleSaveSummary({ markdown: 'Unsaved local edit' })).rejects.toThrow('CONFLICT');
+  const saves=invoke.mock.calls.filter(call=>call[0]==='api_save_meeting_summary');
+  expect(saves[1][1]!.expectedRevision).toBe(1);
+  expect(savedSummary.data).toEqual({ markdown: 'Other editor' });
 });

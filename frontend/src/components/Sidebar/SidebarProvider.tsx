@@ -4,6 +4,8 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { fetchNativeMeetings } from '@/lib/native-bootstrap';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import type { SummaryProcessResponse } from '@/types';
 
@@ -17,6 +19,7 @@ interface SidebarItem {
 }
 
 export interface CurrentMeeting {
+  revision?: number;
   id: string;
   title: string;
 }
@@ -49,10 +52,7 @@ interface SidebarContextType {
   searchTranscripts: (query: string) => Promise<void>;
   searchResults: TranscriptSearchResult[];
   isSearching: boolean;
-  setServerAddress: (address: string) => void;
-  serverAddress: string;
-  transcriptServerAddress: string;
-  setTranscriptServerAddress: (address: string) => void;
+  nativeReady: boolean;
   // Summary polling management
   startSummaryPolling: (
     meetingId: string,
@@ -83,8 +83,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [isMeetingActive, setIsMeetingActive] = useState(false);
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isSearching, setIsSearching] = useState(false);
-  const [serverAddress, setServerAddress] = useState('');
-  const [transcriptServerAddress, setTranscriptServerAddress] = useState('');
+  const [nativeReady, setNativeReady] = useState(false);
   const summaryPollsRef = React.useRef(new Map<string, SummaryPoll>());
 
   // Use recording state from RecordingStateContext (single source of truth)
@@ -93,54 +92,34 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
 
-  // Extract fetchMeetings as a reusable function
   const fetchMeetings = React.useCallback(async () => {
-    if (serverAddress) {
-      try {
-        const meetings = await invoke('api_get_meetings') as Array<{ id: string, title: string }>;
-        const transformedMeetings = meetings.map((meeting: any) => ({
-          id: meeting.id,
-          title: meeting.title
-        }));
-        setMeetings(transformedMeetings);
-        Analytics.trackBackendConnection(true);
-      } catch (error) {
-        console.error('Error fetching meetings:', error);
-        setMeetings([]);
-        Analytics.trackBackendConnection(false, error instanceof Error ? error.message : 'Unknown error');
-      }
+    try {
+      const result = await fetchNativeMeetings(invoke);
+      setNativeReady(result.ready);
+      if (result.meetings) setMeetings(result.meetings);
+      if (result.ready) Analytics.trackBackendConnection(true);
+    } catch (error) {
+      console.error('Error fetching native meetings:', error);
+      Analytics.trackBackendConnection(false, error instanceof Error ? error.message : 'Unknown error');
     }
-  }, [serverAddress]);
-
-  useEffect(() => {
-    fetchMeetings();
-  }, [serverAddress, fetchMeetings]);
-
-  useEffect(() => {
-    const fetchSettings = async () => {
-      setServerAddress('http://localhost:5167');
-      setTranscriptServerAddress('http://127.0.0.1:8178/stream');
-    };
-    fetchSettings();
   }, []);
 
-  const baseItems: SidebarItem[] = [
-    {
-      id: 'meetings',
-      title: 'Meeting Notes',
-      type: 'folder' as const,
-      children: [
-        ...meetings.map(meeting => ({ id: meeting.id, title: meeting.title, type: 'file' as const }))
-      ]
-    },
-  ];
+  useEffect(() => {
+    void fetchMeetings();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen('database-initialized', () => { void fetchMeetings(); }).then((stop) => {
+      if (disposed) stop(); else unlisten = stop;
+    }).catch((error) => console.error('Native readiness listener failed:', error));
+    return () => { disposed = true; unlisten?.(); };
+  }, [fetchMeetings]);
 
+  const baseItems: SidebarItem[] = [{
+    id: 'meetings', title: 'Meeting Notes', type: 'folder',
+    children: meetings.map(meeting => ({ id: meeting.id, title: meeting.title, type: 'file' as const })),
+  }];
+  const toggleCollapse = () => { setIsCollapsed(value => !value); };
 
-  const toggleCollapse = () => {
-    setIsCollapsed(!isCollapsed);
-  };
-
-  // Update current meeting when on home page
   useEffect(() => {
     if (pathname === '/') {
       setCurrentMeeting({ id: 'intro-call', title: '+ New Call' });
@@ -309,10 +288,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
       searchTranscripts,
       searchResults,
       isSearching,
-      setServerAddress,
-      serverAddress,
-      transcriptServerAddress,
-      setTranscriptServerAddress,
+      nativeReady,
       startSummaryPolling,
       stopSummaryPolling,
       refetchMeetings: fetchMeetings,

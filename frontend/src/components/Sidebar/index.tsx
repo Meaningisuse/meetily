@@ -1,5 +1,7 @@
 'use client';
 
+import { fetchNativeConfiguration } from '@/lib/native-bootstrap';
+
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { ChevronDown, ChevronRight, File, Settings, ChevronLeftCircle, ChevronRightCircle, Calendar, StickyNote, Home, Trash2, Mic, Square, Plus, Search, Pencil, NotebookPen, SearchIcon, X, Upload } from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
@@ -54,7 +56,7 @@ const Sidebar: React.FC = () => {
     isSearching,
     meetings,
     setMeetings,
-    serverAddress
+    nativeReady
   } = useSidebar();
 
   // Get recording state from RecordingStateContext (single source of truth)
@@ -106,59 +108,25 @@ const Sidebar: React.FC = () => {
   const [deleteModalState, setDeleteModalState] = useState<{ isOpen: boolean; itemId: string | null }>({ isOpen: false, itemId: null });
 
   useEffect(() => {
-    // Note: Don't set hardcoded defaults - let DB be the source of truth
-    const fetchModelConfig = async () => {
-      // Only make API call if serverAddress is loaded
-      if (!serverAddress) {
-        console.log('Waiting for server address to load before fetching model config');
-        return;
-      }
-
+    if (!nativeReady) return;
+    let cancelled = false;
+    const fetchConfiguration = async () => {
       try {
-        const data = await invoke('api_get_model_config') as any;
+        const { model: data, transcript } = await fetchNativeConfiguration(invoke);
+        if (cancelled) return;
+        if (transcript && transcript.provider !== null) setTranscriptModelConfig(transcript);
         if (data && data.provider !== null) {
-          // Fetch API key if not included and provider requires it
           if (data.provider !== 'ollama' && !data.apiKey) {
-            try {
-              const apiKeyData = await invoke('api_get_api_key', {
-                provider: data.provider
-              }) as string;
-              data.apiKey = apiKeyData;
-            } catch (err) {
-              console.error('Failed to fetch API key:', err);
-            }
+            try { data.apiKey = await invoke<string>('api_get_api_key', { provider: data.provider }); }
+            catch (error) { console.error('Failed to fetch API key:', error); }
           }
-          setModelConfig(data);
+          if (!cancelled) setModelConfig(data);
         }
-      } catch (error) {
-        console.error('Failed to fetch model config:', error);
-      }
+      } catch (error) { console.error('Failed to fetch native settings:', error); }
     };
-
-    fetchModelConfig();
-  }, [serverAddress]);
-
-
-  useEffect(() => {
-    // Note: Don't set hardcoded defaults - let DB be the source of truth
-    const fetchTranscriptSettings = async () => {
-      // Only make API call if serverAddress is loaded
-      if (!serverAddress) {
-        console.log('Waiting for server address to load before fetching transcript settings');
-        return;
-      }
-
-      try {
-        const data = await invoke('api_get_transcript_config') as any;
-        if (data && data.provider !== null) {
-          setTranscriptModelConfig(data);
-        }
-      } catch (error) {
-        console.error('Failed to fetch transcript settings:', error);
-      }
-    };
-    fetchTranscriptSettings();
-  }, [serverAddress]);
+    void fetchConfiguration();
+    return () => { cancelled = true; };
+  }, [nativeReady]);
 
   // Listen for model config updates from other components
   useEffect(() => {
@@ -384,14 +352,17 @@ const Sidebar: React.FC = () => {
     }
 
     try {
-      await invoke('api_save_meeting_title', {
+      const expectedRevision = meetings.find(item => item.id === meetingId)?.revision;
+      if (expectedRevision === undefined) throw new Error('Reload meetings before renaming.');
+      const saved = await invoke<{ revision: number }>('api_save_meeting_title', {
         meetingId: meetingId,
         title: newTitle,
+        expectedRevision,
       });
 
       // Update local state
       const updatedMeetings = meetings.map((m: CurrentMeeting) =>
-        m.id === meetingId ? { ...m, title: newTitle } : m
+        m.id === meetingId ? { ...m, title: newTitle, revision: saved.revision } : m
       );
       setMeetings(updatedMeetings);
 

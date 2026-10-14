@@ -735,6 +735,10 @@ async fn create_meeting_with_transcripts(
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
     }
 
+    crate::database::repositories::content_version::bump(
+        &mut tx, &meeting_id, crate::database::repositories::content_version::ContentKind::Transcript
+    ).await.map_err(|e| anyhow!("Failed to update transcript version: {}", e))?;
+
     tx.commit()
         .await
         .map_err(|e| anyhow!("Failed to commit transaction: {}", e))?;

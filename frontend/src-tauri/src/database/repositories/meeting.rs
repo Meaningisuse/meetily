@@ -9,7 +9,7 @@ pub struct MeetingsRepository;
 impl MeetingsRepository {
     pub async fn get_meetings(pool: &SqlitePool) -> Result<Vec<MeetingModel>, sqlx::Error> {
         let meetings =
-            sqlx::query_as::<_, MeetingModel>("SELECT * FROM meetings ORDER BY created_at DESC")
+            sqlx::query_as::<_, MeetingModel>("SELECT m.*,COALESCE(v.revision,0) AS revision FROM meetings m LEFT JOIN meeting_content_versions v ON v.meeting_id=m.id ORDER BY m.created_at DESC,m.id")
                 .fetch_all(pool)
                 .await?;
         Ok(meetings)
@@ -192,6 +192,9 @@ impl MeetingsRepository {
             transaction.rollback().await?;
             return Ok(false);
         }
+        crate::database::repositories::content_version::bump(
+            &mut transaction, meeting_id, crate::database::repositories::content_version::ContentKind::Title
+        ).await?;
         transaction.commit().await?;
         Ok(true)
     }
@@ -225,6 +228,9 @@ impl MeetingsRepository {
             .execute(&mut *transaction)
             .await?;
 
+        crate::database::repositories::content_version::bump(
+            &mut transaction, meeting_id, crate::database::repositories::content_version::ContentKind::Title
+        ).await?;
         transaction.commit().await?;
         Ok(true)
     }

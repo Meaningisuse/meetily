@@ -78,6 +78,7 @@ interface UseSummaryGenerationProps {
   onMeetingUpdated?: () => Promise<void>;
   updateMeetingTitle: (title: string) => void;
   setAiSummary: (summary: MeetingSummary | null) => void;
+  setSourceRevision?: (revision: number) => void;
   onOpenModelSettings?: () => void;
 }
 
@@ -91,6 +92,7 @@ export function useSummaryGeneration({
   onMeetingUpdated,
   updateMeetingTitle,
   setAiSummary,
+  setSourceRevision,
   onOpenModelSettings,
 }: UseSummaryGenerationProps) {
   const restored = initialSummary?.meeting_id === meeting.id ? initialSummary : null;
@@ -192,6 +194,7 @@ export function useSummaryGeneration({
       }
       const restoredSummary = parseSummaryContent(existing.data);
       setAiSummary(restoredSummary);
+      if (typeof existing.revision === 'number') setSourceRevision?.(existing.revision);
       setSummaryStatus(restoredSummary ? 'completed' : 'idle');
       setSummaryError(null);
       activeProcessIdRef.current = null;
@@ -220,6 +223,7 @@ export function useSummaryGeneration({
         const restoredSummary = parseSummaryContent(existing.data);
         if (restoredSummary) {
           setAiSummary(restoredSummary);
+          if (typeof existing.revision === 'number') setSourceRevision?.(existing.revision);
           setSummaryStatus('completed');
           setSummaryError(null);
           toast.error('Failed to regenerate summary', {
@@ -249,6 +253,7 @@ export function useSummaryGeneration({
         updateMeetingTitle(meetingName);
       }
       setAiSummary(summary);
+      if (typeof pollingResult.revision === 'number') setSourceRevision?.(pollingResult.revision);
       setSummaryStatus('completed');
       activeProcessIdRef.current = null;
       setSummaryError(null);
@@ -272,7 +277,7 @@ export function useSummaryGeneration({
         metadata.normalizationFallback ? 'fallback' : 'ok',
       );
     }
-  }, [failGeneration, finishGeneration, meeting.id, onMeetingUpdated, setAiSummary, updateMeetingTitle]);
+  }, [failGeneration, finishGeneration, meeting.id, onMeetingUpdated, setAiSummary, setSourceRevision, updateMeetingTitle]);
 
   // Keep polling attached across ordinary rerenders without retaining stale view callbacks.
   const pollingResultRef = useRef(handlePollingResult);

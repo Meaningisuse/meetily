@@ -9,10 +9,11 @@ import { hasVisibleSummaryContent } from '@/lib/summary-content';
 interface UseMeetingDataProps {
   meeting: any;
   summaryData: MeetingSummary | null;
+  summaryRevision?: number | null;
   onMeetingUpdated?: () => Promise<void>;
 }
 
-export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMeetingDataProps) {
+export function useMeetingData({ meeting, summaryData, summaryRevision, onMeetingUpdated }: UseMeetingDataProps) {
   // State
   // Use prop directly since summary generation fetches transcripts independently
   const transcripts = meeting.transcripts;
@@ -20,6 +21,9 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
   const [aiSummary, setAiSummary] = useState<MeetingSummary | null>(summaryData);
   const [isSaving, setIsSaving] = useState(false);
   const [isSummaryDirty, setIsSummaryDirty] = useState(false);
+
+  const sourceRevision = useRef<number | null>(summaryRevision ?? null);
+  const setSourceRevision = useCallback((revision: number) => { sourceRevision.current = revision; }, []);
 
   // Ref for BlockNoteSummaryView
   const blockNoteSummaryRef = useRef<BlockNoteSummaryViewRef>(null);
@@ -31,7 +35,8 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
   useEffect(() => {
     console.log('[useMeetingData] Syncing summary data from prop:', summaryData ? 'present' : 'null');
     setAiSummary(summaryData);
-  }, [summaryData]); // Only trigger when parent prop changes, not when aiSummary changes
+    sourceRevision.current = summaryRevision ?? null;
+  }, [summaryData, summaryRevision]); // Only trigger when parent prop changes, not when aiSummary changes
 
   const handleSummaryChange = useCallback((newSummary: Summary) => {
     setAiSummary(newSummary);
@@ -47,10 +52,13 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
     const formattedSummary = 'markdown' in summary || 'summary_json' in summary
       ? summary
       : { MeetingName: meetingTitle, ...summary };
-    await invokeTauri('api_save_meeting_summary', {
+    if (sourceRevision.current === null) throw new Error('Reload the saved summary before editing.');
+    const saved = await invokeTauri<{ revision: number }>('api_save_meeting_summary', {
       meetingId: meeting.id,
       summary: formattedSummary,
+      expectedRevision: sourceRevision.current,
     });
+    sourceRevision.current = saved.revision;
   }, [meeting.id, meetingTitle]);
 
   const saveAllChanges = useCallback(async () => {
@@ -78,7 +86,7 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
     console.log('📝 Updating meeting title to:', newTitle);
     setMeetingTitle(newTitle);
     const updatedMeetings = sidebarMeetings.map((m: CurrentMeeting) =>
-      m.id === meeting.id ? { id: m.id, title: newTitle } : m
+      m.id === meeting.id ? { ...m, title: newTitle } : m
     );
     setMeetings(updatedMeetings);
     setCurrentMeeting({ id: meeting.id, title: newTitle });
@@ -96,6 +104,7 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
     // Setters
     setMeetingTitle,
     setAiSummary,
+    setSourceRevision,
     setIsSummaryDirty,
 
     // Handlers

@@ -110,6 +110,7 @@ export interface CancelSummaryResponse {
 }
 
 export interface SummaryProcessResponse {
+  revision?: number | null;
   status: SummaryProcessStatus;
   meetingName: string | null;
   meeting_id: string;

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "meeting_id": "golden",
+  "title": "中文会议",
+  "created_at": "2026-10-14T00:00:00+00:00",
+  "versions": {"revision": 0, "transcript_revision": 0, "speaker_revision": 0, "summary_revision": 0, "notes_revision": 0},
+  "summary_markdown": null,
+  "notes_markdown": null,
+  "transcript": [{"id": "segment", "text": "没有时间", "start_ms": null, "end_ms": null, "speaker_id": null, "speaker_name": null, "assignment": "unknown"}],
+  "summary_stale": false
+}

@@ -41,6 +41,7 @@ pub mod audio;
 pub mod config;
 pub mod console_utils;
 pub mod database;
+pub mod meeting;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
@@ -610,6 +611,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            meeting::commands::api_native_ready,
+            meeting::commands::api_get_meeting_document,
+            meeting::commands::api_save_meeting_notes,
             start_recording,
             stop_recording,
             is_recording,
@@ -714,9 +718,6 @@ pub fn run() {
             groq::groq::get_groq_models,
             api::api_get_meetings,
             api::api_search_transcripts,
-            api::api_get_profile,
-            api::api_save_profile,
-            api::api_update_profile,
             api::api_get_model_config,
             api::api_save_model_config,
             api::api_get_api_key,
@@ -732,8 +733,6 @@ pub fn run() {
             api::api_save_meeting_title,
             api::api_save_transcript,
             api::open_meeting_folder,
-            api::test_backend_connection,
-            api::debug_backend_connection,
             api::open_external_url,
             // Custom OpenAI commands
             api::api_save_custom_openai_config,

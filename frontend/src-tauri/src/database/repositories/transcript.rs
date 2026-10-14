@@ -76,6 +76,10 @@ impl TranscriptsRepository {
             meeting_id
         );
 
+        crate::database::repositories::content_version::bump(
+            &mut transaction, &meeting_id, crate::database::repositories::content_version::ContentKind::Transcript
+        ).await?;
+
         // Commit the transaction
         transaction.commit().await?;
 

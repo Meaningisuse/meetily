@@ -2,7 +2,7 @@ use crate::database::models::SummaryProcess;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::SqlitePool;
-use tracing::{error, info as log_info};
+use tracing::info as log_info;
 
 pub struct SummaryProcessesRepository;
 
@@ -23,53 +23,23 @@ impl SummaryProcessesRepository {
         meeting_id: &str,
         summary: &Value,
     ) -> Result<bool, sqlx::Error> {
-        let mut transaction = pool.begin().await?;
-
-        let meeting_exists: bool = sqlx::query("SELECT 1 FROM meetings WHERE id = ?")
+        if sqlx::query("SELECT id FROM meetings WHERE id=?")
             .bind(meeting_id)
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(pool)
             .await?
-            .is_some();
-
-        if !meeting_exists {
-            log_info!(
-                "Attempted to save summary for a non-existent meeting_id: {}",
-                meeting_id
-            );
-            transaction.rollback().await?;
+            .is_none()
+        {
             return Ok(false);
         }
-
-        let result_json = serde_json::to_string(summary);
-        if result_json.is_err() {
-            error!("Can't convert the json to string for saving to Database");
-            transaction.rollback().await?;
-            return Ok(false);
-        }
-        let now = Utc::now();
-        let update = sqlx::query("UPDATE summary_processes SET result = ?, updated_at = ? WHERE meeting_id = ?")
-            .bind(&result_json.unwrap())
-            .bind(now)
-            .bind(meeting_id)
-            .execute(&mut *transaction)
-            .await?;
-        if update.rows_affected() == 0 {
-            transaction.rollback().await?;
-            return Ok(false);
-        }
-
-        sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ?")
-            .bind(now)
-            .bind(meeting_id)
-            .execute(&mut *transaction)
-            .await?;
-
-        transaction.commit().await?;
-
-        log_info!(
-            "Successfully updated summary and timestamp for meeting_id: {}",
-            meeting_id
-        );
+        let revision: Option<i64> =
+            sqlx::query_scalar("SELECT revision FROM meeting_content_versions WHERE meeting_id=?")
+                .bind(meeting_id)
+                .fetch_optional(pool)
+                .await?;
+        crate::meeting::MeetingWriteService::new(pool.clone())
+            .save_summary_value(meeting_id, summary, revision.unwrap_or(0))
+            .await
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
         Ok(true)
     }
 
@@ -78,7 +48,7 @@ impl SummaryProcessesRepository {
         meeting_id: &str,
     ) -> Result<Option<SummaryProcess>, sqlx::Error> {
         sqlx::query_as::<_, SummaryProcess>(
-            "SELECT p.* FROM summary_processes p JOIN transcript_chunks t ON p.meeting_id = t.meeting_id WHERE p.meeting_id = ?",
+            "SELECT p.*,COALESCE(v.revision,0) AS content_revision FROM summary_processes p LEFT JOIN meeting_content_versions v ON v.meeting_id=p.meeting_id WHERE p.meeting_id = ?",
         )
         .bind(meeting_id)
         .fetch_optional(pool)
@@ -129,6 +99,7 @@ impl SummaryProcessesRepository {
         chunk_count: i64,
         processing_time: f64,
     ) -> Result<bool, sqlx::Error> {
+        let mut transaction = pool.begin().await?;
         let now = Utc::now();
         let result_str = serde_json::to_string(&result)
             .map_err(|e| sqlx::Error::Protocol(format!("Failed to serialize result: {}", e)))?;
@@ -140,15 +111,27 @@ impl SummaryProcessesRepository {
             WHERE meeting_id = ? AND start_time = ? AND LOWER(status) = 'pending'
             "#
         )
-        .bind(result_str)
+        .bind(&result_str)
         .bind(now)
         .bind(now)
         .bind(chunk_count)
         .bind(processing_time)
         .bind(meeting_id)
         .bind(started_at)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await?;
+        if update.rows_affected() == 1 {
+            let versions = crate::database::repositories::content_version::bump(
+                &mut transaction,
+                meeting_id,
+                crate::database::repositories::content_version::ContentKind::Summary,
+            )
+            .await?;
+            let markdown = crate::meeting::normalize::summary_markdown(&result_str);
+            sqlx::query("INSERT INTO meeting_document_content(meeting_id,summary_markdown,summary_source_transcript_revision,summary_source_speaker_revision) VALUES(?,?,?,?) ON CONFLICT(meeting_id) DO UPDATE SET summary_markdown=excluded.summary_markdown,summary_source_transcript_revision=excluded.summary_source_transcript_revision,summary_source_speaker_revision=excluded.summary_source_speaker_revision")
+                .bind(meeting_id).bind(markdown).bind(versions.transcript_revision).bind(versions.speaker_revision).execute(&mut *transaction).await?;
+        }
+        transaction.commit().await?;
         Ok(update.rows_affected() == 1)
     }
 
@@ -221,26 +204,7 @@ mod tests {
     use serde_json::json;
 
     async fn test_pool() -> SqlitePool {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query(
-            "CREATE TABLE summary_processes (
-                meeting_id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                created_at TEXT,
-                updated_at TEXT,
-                start_time TEXT,
-                result TEXT,
-                result_backup TEXT,
-                result_backup_timestamp TEXT,
-                end_time TEXT,
-                chunk_count INTEGER,
-                processing_time REAL,
-                error TEXT
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        let pool = crate::meeting::tests::pool().await;
         pool
     }
 
@@ -251,6 +215,7 @@ mod tests {
         result: Option<&str>,
         result_backup: Option<&str>,
     ) {
+        crate::meeting::tests::seed(pool, meeting_id).await;
         sqlx::query(
             "INSERT INTO summary_processes (
                 meeting_id, status, created_at, updated_at, start_time, result, result_backup
@@ -272,27 +237,23 @@ mod tests {
         let pool = test_pool().await;
         let completed_start = Utc::now();
         seed_pending(&pool, "completed-first", completed_start, None, None).await;
-        assert!(
-            SummaryProcessesRepository::update_process_completed(
-                &pool,
-                "completed-first",
-                completed_start,
-                json!({"markdown": "completed"}),
-                1,
-                1.0,
-            )
-            .await
-            .unwrap()
-        );
-        assert!(
-            !SummaryProcessesRepository::update_process_cancelled(
-                &pool,
-                "completed-first",
-                completed_start,
-            )
-            .await
-            .unwrap()
-        );
+        assert!(SummaryProcessesRepository::update_process_completed(
+            &pool,
+            "completed-first",
+            completed_start,
+            json!({"markdown": "completed"}),
+            1,
+            1.0,
+        )
+        .await
+        .unwrap());
+        assert!(!SummaryProcessesRepository::update_process_cancelled(
+            &pool,
+            "completed-first",
+            completed_start,
+        )
+        .await
+        .unwrap());
         let completed_status: String = sqlx::query_scalar(
             "SELECT status FROM summary_processes WHERE meeting_id = 'completed-first'",
         )
@@ -311,27 +272,23 @@ mod tests {
             Some(previous),
         )
         .await;
-        assert!(
-            SummaryProcessesRepository::update_process_cancelled(
-                &pool,
-                "cancelled-first",
-                cancelled_start,
-            )
-            .await
-            .unwrap()
-        );
-        assert!(
-            !SummaryProcessesRepository::update_process_completed(
-                &pool,
-                "cancelled-first",
-                cancelled_start,
-                json!({"markdown": "completed"}),
-                1,
-                1.0,
-            )
-            .await
-            .unwrap()
-        );
+        assert!(SummaryProcessesRepository::update_process_cancelled(
+            &pool,
+            "cancelled-first",
+            cancelled_start,
+        )
+        .await
+        .unwrap());
+        assert!(!SummaryProcessesRepository::update_process_completed(
+            &pool,
+            "cancelled-first",
+            cancelled_start,
+            json!({"markdown": "completed"}),
+            1,
+            1.0,
+        )
+        .await
+        .unwrap());
         let cancelled: (String, String) = sqlx::query_as(
             "SELECT status, result FROM summary_processes WHERE meeting_id = 'cancelled-first'",
         )
@@ -346,20 +303,19 @@ mod tests {
         let pool = test_pool().await;
         let current_start = Utc::now();
         seed_pending(&pool, "stale-cancel", current_start, None, None).await;
-        assert!(
-            !SummaryProcessesRepository::update_process_cancelled(
-                &pool,
-                "stale-cancel",
-                current_start - chrono::Duration::nanoseconds(1),
-            )
-            .await
-            .unwrap()
-        );
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM summary_processes WHERE meeting_id = 'stale-cancel'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        assert!(!SummaryProcessesRepository::update_process_cancelled(
+            &pool,
+            "stale-cancel",
+            current_start - chrono::Duration::nanoseconds(1),
+        )
+        .await
+        .unwrap());
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM summary_processes WHERE meeting_id = 'stale-cancel'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(status, "PENDING");
     }
 }
