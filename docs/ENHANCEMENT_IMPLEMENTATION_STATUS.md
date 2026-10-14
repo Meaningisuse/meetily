@@ -106,3 +106,6 @@ P4候选后续验证：在临时目录构建 MIT moss-transcribe.cpp（source `1
 
 
 2026-10-14 Sortformer v2 本机公开集诊断补充：按用户授权，仅在 Apple M5 Metal 本地运行，未打包或发布模型。固定 NeMo-Speech.cpp v0.2.0 与 Q8_0 权重，19场/612.149分钟一次冻结批次完成，0失败；总耗时982.78秒（RTF 0.0268），峰值RSS 1,248,722,944字节。使用250ms collar和重叠外/内分别计分，19场微平均DER 4.03%/7.89%，宏平均4.37%/7.52%，19/19场主DER低于20%。评分器在sample-01的30秒裁片上与既有`run_probe.der`交叉核对一致。性能质量门槛初步达标，但NVIDIA模型卡包含AliMeeting训练数据，具体会议/拆分重叠未审计，因此不能称独立留出成绩；模型最多4人且以英语为主，单人/中英切换、120分钟单文件、取消、打包和分发许可仍未验收。D1仍NO-GO，D3–D5未启动。完整匿名聚合数据见`DIARIZATION_SPIKE_RESULTS.md`；所有音频、RTTM、权重与逐场输出均留在仓库外。
+
+
+P4 Sortformer 分组与长时资源门禁补测（2026-10-14）：19场中2人组（8场）DER 1.23% micro/1.24% macro、overlap 1.36%/1.35%；3人组（4场）7.94%/8.12%、overlap 9.73%/9.94%；4人组（7场）5.39%/5.82%、overlap 13.28%/13.18%。另将公开AliMeeting Test sample-01拼接四次、段间加5秒静音生成单个138.018分钟mono WAV作资源压力测试（不是自然两小时会议质量评测）：Apple M5 Metal干净退出，3,239段/4个speaker label，253.23秒、RTF 0.0306；峰值RSS 3,026,321,408字节（2.82 GiB），peak memory footprint 3,087,453,184字节（2.88 GiB），超过2 GiB门槛。另测CLI运行5秒后收到SIGINT，0.037秒退出、返回码-2且无RTTM；只证明OS信号可及时终止命令行进程，不代表Meetily应用内协作取消。Sortformer质量分数尚不能视为独立holdout，具体训练会议未公开核对；D1因内存门禁失败和训练数据重叠未澄清仍NO-GO，D3–D5未开始。
