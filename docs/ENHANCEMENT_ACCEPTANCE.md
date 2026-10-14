@@ -33,17 +33,17 @@ cargo run --locked -p meetily --example processing_stress -- /path/to/ggml-tiny.
 | 真实磁盘满 | 已接受输入保留、预算满/坏存储目标注入测试 | 待现场验收 |
 | 强制退出后真实会议恢复 | 重启pending/校验/去重/恢复UI测试 | 待现场验收 |
 | 中文长会议摘要质量 | 中文预算及尾行动项mock HTTP回归 | 待真实会议验收 |
-| 中文说话人效果 | 尚无获准的本地标注数据和独立留出集 | P4效果门禁待验证 |
+| 中文说话人效果 | AliMeeting Test公开标注集已在仓库外匿名准备；首样本无监督DER未通过 | P4保持NO-GO；未完成全留出集、120分钟资源、单人/中英切换验收 |
 
 P0工程任务完成不意味着上述实际运行/业务验收已完成。P3、P4另按各任务验证并提交，不越过效果门禁宣称Pro对齐全部完成。
 
 ## 2026-10-14 本轮重新验证
 
-- `scripts/check-enhancement.sh --all`：Node行为回归17通过；Bun前端57通过；TypeScript检查、Next静态生产构建、automation-client构建及其5项测试通过；原生helper构建；Rust库测试318通过、0失败、3忽略。此全量命令早于下述最终测试fixture从PEM改为DER的清理。
+- `scripts/check-enhancement.sh --all`（2026-10-14最新运行）：Node行为回归17通过；Bun前端57通过；TypeScript检查、Next静态生产构建、automation-client构建及5项客户端测试、Secure MCP Tunnel启动器隔离测试通过；原生helper构建；Rust库测试326通过、0失败、4忽略。Bun 1.3.14、CMake 3.31.6使用任务临时路径与`PYTHONPATH`，未修改全局安装。构建中有既存编译warning，但命令退出码为0。
 - 最终DER fixture变更后，`scripts/check-enhancement.sh --native`：Rust库测试318通过、0失败、3忽略；定向 `rustfmt --check` 通过。
 - `scripts/check-enhancement.sh --bundle`：release helper与Tauri macOS `.app` 打包成功，产物位于 `target/release/bundle/macos/meetily.app`。本次只验证构建/签名，不代表启动或实际设备录音；未配置Apple notarization凭证，因此跳过公证。
-- Bun 1.3.14与CMake 3.31.6使用任务临时路径，不修改全局安装。Webhook集成测试新增Rust测试依赖并更新 `Cargo.lock`；没有改动pnpm锁文件。
+- Webhook集成测试新增Rust测试依赖并更新 `Cargo.lock`；没有改动pnpm锁文件。
 
-P3代码与自动化测试已有提交。新增测试专用loopback HTTPS receiver端到端用例，以真实TLS请求验证固定目标IP、原始JSON正文HMAC、503重试后200成功、重复投递保持同一事件ID/正文、401终止以及服务端延迟导致的超时。该用例使用明确提供的测试根证书，不放宽生产信任配置；这不是面向真实第三方平台的交付验收。真实助手宿主连接、真实macOS webhook Keychain读回和设备录音仍待现场验收。
+P3代码与自动化测试已有提交。新增测试专用loopback HTTPS receiver端到端用例，以真实TLS请求验证固定目标IP、原始JSON正文HMAC、503重试后200成功、重复投递保持同一事件ID/正文、401终止以及服务端延迟导致的超时。ChatGPT Secure MCP Tunnel启动器已加入：运行测试以假的`tunnel-client`验证API key不进入argv，包测试统一包含该项；真实Platform/ChatGPT连接仍缺`tunnel_id`、runtime key及组织/工作区权限，真实macOS webhook Keychain读回和设备录音仍待现场验收。
 
-P4 D1为明确NO-GO，未进入D3–D5。D2新增了受校验的Whisper分段时间传递：标准无时间戳解码仍是文本来源，第二次时间戳解码只有在文本一致且时间范围有效时才提供exact分段；失败时保留标准文本并标记时间unavailable。该路径已覆盖实时录音、catch-up、导入和重转写。最新Rust全量测试为326通过、0失败、4忽略；前端57通过，类型检查、Next构建和automation-client 5项客户端测试通过。另以多语言tiny模型和本机生成的中文TTS做了CPU及Apple M5 Metal双解码冒烟回归：两次解码保留同一尾句，差异仅为末尾句号；模型把“会议纪要”误识为“会议技药”，故此结果不代表中文识别准确率或时间精度。JFK Metal烟测也通过。之前Rust测试进程SIGSEGV是受限沙箱中`MTLCreateSystemDefaultDevice()`返回nil造成；沙箱外Metal模型加载和推理通过。真实会议时间标注对照、双次解码性能和三入口试听仍未验证。公开AISHELL-4/AliMeeting可作研究候选，但pyannote segmentation-3.0模型卡列出两者为训练数据，因此不构成该模型的独立留出集。当前没有本地标注中文会议音频/RTTM，也未确认完整模型栈和转换工件的分发许可，不能把P4或Pro中文效果对齐标为完成。
+P4 D1已将OpenSLR AliMeeting Test归档生成20个仓库外匿名样本，合计646.591分钟；数据和CC BY-SA 4.0归属说明留在私有目录。sherpa-onnx 1.13.8 CPU首样本诊断：无监督聚类阈值0.5/0.8的DER分别78.24%/51.38%，已知4人oracle为17.08%；因此D1明确NO-GO，未进入D3–D5。完整会话重叠审计、全留出DER、120分钟资源、许可/打包和听音验收仍未通过。D2新增了受校验的Whisper分段时间传递：标准无时间戳解码仍是文本来源，第二次时间戳解码只有在文本一致且时间范围有效时才提供exact分段；失败时保留标准文本并标记时间unavailable。该路径已覆盖实时录音、catch-up、导入和重转写。公开AliMeeting的一个120秒片段与8个30秒高语音片段在tiny模型下9/9安全回退为Unavailable；base模型同一30秒窗口也回退，没有形成可评分的精确时间。多语言tiny模型加本机生成中文TTS的CPU及Apple M5 Metal双解码仍通过尾句保护，JFK Metal烟测通过；这些不证明真实会议时间精度。之前Rust测试进程SIGSEGV是受限沙箱中`MTLCreateSystemDefaultDevice()`返回nil造成；沙箱外Metal模型加载和推理通过。真实会议时间标注对照、双解码性能和三入口试听仍未验证，因此D2及P4均未完成。
