@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import itertools
 import json
 import os
 import platform
@@ -63,17 +62,43 @@ def collar_frames(reference: list[tuple[float, float, str]], total: int, collar:
 def map_labels(reference: list[tuple[float, float, str]], hypothesis: list[tuple[float, float, str]], total: int) -> dict[str, str]:
     ref_labels = sorted({speaker for _, _, speaker in reference})
     hyp_labels = sorted({speaker for _, _, speaker in hypothesis})
-    if len(hyp_labels) > 8 or len(ref_labels) > 8:
-        raise ValueError("DER scorer supports at most eight speakers per recording")
-    candidates = ref_labels + [f"__miss_{index}" for index in range(max(0, len(hyp_labels) - len(ref_labels)))]
-    best_score, best = -1, {}
+    if len(ref_labels) > 8:
+        raise ValueError("DER scorer supports at most eight reference speakers per recording")
     ref_frames = [active(reference, (i + 0.5) * FRAME_SECONDS) for i in range(total)]
     hyp_frames = [active(hypothesis, (i + 0.5) * FRAME_SECONDS) for i in range(total)]
-    for assigned in itertools.permutations(candidates, len(hyp_labels)):
-        mapping = dict(zip(hyp_labels, assigned))
-        score = sum(len(ref & {mapping[label] for label in hyp}) for ref, hyp in zip(ref_frames, hyp_frames))
-        if score > best_score:
-            best_score, best = score, mapping
+    # Dynamic programming over the (at most eight) reference speakers gives an
+    # exact one-to-one maximum-overlap assignment while allowing any number of
+    # hypothesis speakers. Unmatched hypothesis labels remain false alarms.
+    overlap = {label: {ref: 0 for ref in ref_labels} for label in hyp_labels}
+    for ref, hyp in zip(ref_frames, hyp_frames):
+        for label in hyp:
+            for speaker in ref:
+                overlap[label][speaker] += 1
+
+    states: dict[int, tuple[int, tuple[str | None, ...]]] = {0: (0, ())}
+    for label in hyp_labels:
+        next_states: dict[int, tuple[int, tuple[str | None, ...]]] = {}
+        for mask, (score, assignment) in states.items():
+            previous = next_states.get(mask)
+            skipped = (score, assignment + (None,))
+            if previous is None or skipped[0] > previous[0]:
+                next_states[mask] = skipped
+            for index, speaker in enumerate(ref_labels):
+                bit = 1 << index
+                if mask & bit:
+                    continue
+                updated_mask = mask | bit
+                matched = (score + overlap[label][speaker], assignment + (speaker,))
+                previous = next_states.get(updated_mask)
+                if previous is None or matched[0] > previous[0]:
+                    next_states[updated_mask] = matched
+        states = next_states
+
+    _, assignment = max(states.values(), key=lambda state: state[0])
+    best = {
+        label: speaker if speaker is not None else f"__miss_{index}"
+        for index, (label, speaker) in enumerate(zip(hyp_labels, assignment))
+    }
     return best
 
 
