@@ -46,7 +46,9 @@ MEETILY_AUTOMATION_CLIENT_ID='<client-id>' node automation-client/dist/cli.js jo
 
 ### 主机兼容性
 
-上面的配置只适用于支持本地 stdio MCP 的桌面主机。按 OpenAI 当前文档，ChatGPT 自定义 MCP app 直接连接远程 MCP server，不支持直接连接本机服务；ChatGPT Desktop 的本地 MCP 运行路径属于桌面插件发布流程，当前仅对获准合作方开放。不要把上述 JSON 直接粘贴到 ChatGPT 配置中；若目标是 ChatGPT，需使用其支持的远程连接/获准桌面插件方式，并单独评估本机回环网关的安全边界。[ChatGPT MCP 开发者模式说明](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt) · [ChatGPT Desktop 本地 MCP 插件说明](https://developers.openai.com/plugins/deploy/desktop-only)
+ChatGPT 自定义 MCP app 不直接连接本机 stdio 服务。OpenAI Secure MCP Tunnel 可让本机 `tunnel-client` 通过出站 HTTPS 连接 OpenAI，再把 MCP 请求转发给本机 stdio 命令；Meetily 服务仍只监听 loopback，不需开放入站端口或公网地址。连接需要 Platform `tunnel_id`、供 `tunnel-client` 使用的 runtime API key、Platform 组织的 Tunnels Read + Use 权限，以及 ChatGPT 工作区允许添加自定义 MCP server；创建或修改 tunnel 另需 Tunnels Read + Manage。[Secure MCP Tunnel 指南](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) · [ChatGPT MCP 开发者模式说明](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)
+
+Meetily MCP 客户端当前仅公开五个只读工具，适合 ChatGPT Pro 的 read/fetch 权限。摘要写入、任务取消和录音控制不通过 Pro MCP 提供；OpenAI 文档目前将完整 MCP 写操作列为 Business、Enterprise 和 Edu 工作区的 beta 能力。`tunnel-client` 的管理与凭据配置尚未完成，不能把本机 stdio 单独配置当成 ChatGPT 已连接。[Secure MCP Tunnel 权限与接入](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) · [ChatGPT MCP 计划与权限说明](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)
 
 ## Webhook 接收
 
