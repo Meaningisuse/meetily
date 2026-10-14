@@ -60,6 +60,8 @@
 
 2026-10-14 follow-up: Parakeet TDT token-emission timestamps are now converted to word spans marked `Approximate` and propagated through recording, catch-up, import, and retranscription. Malformed/out-of-range data returns `Unavailable`; word ends inferred from the next token start are not exact alignment. A model-backed JFK English smoke test passed with 22 bounded spans using locally downloaded, pinned CC BY 4.0 Parakeet v2 INT8 artifacts; the test has no independent word-time reference, so it proves the runtime path only. D2 remains incomplete pending annotation-backed boundary error and three-entry playback; D1 NO-GO still blocks D3–D5.
 
+2026-10-14 playback implementation follow-up: transcript details now resolve the saved audio by meeting ID, authorize only the canonical audio file inside that meeting folder, stream it through the Tauri asset protocol, and let transcript timestamps seek the shared audio control. One focused Rust boundary test suite covers valid resolution, missing audio, and an escaping symlink; the release build and UI type check passed. The three source flows share this UI, but same-sample in-app play/seek across record/import/retranscription has not been exercised; keep the task checkbox incomplete until runtime evidence exists.
+
 ## Task D3：版本化run和批处理engine
 
 **Files:** 新增 `20261014000500_add_diarization.sql`、`diarization/{mod,types,engine,service,alignment,model_manager,commands}.rs`、`database/repositories/diarization.rs`；修改 `jobs/`、`lib.rs`、录音停止/导入/重转写完成入口、已验证模型runtime打包脚本。
