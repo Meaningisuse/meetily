@@ -5,8 +5,8 @@ use super::{
 };
 use crate::meeting::EnhancementError;
 use axum::{
-    extract::{Request, State},
-    http::StatusCode,
+    extract::{Path, Request, State},
+    http::{StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -180,6 +180,11 @@ impl AutomationServer {
         };
         let routes = Router::new()
             .route("/health", get(health))
+            .route("/meetings", get(list_meetings))
+            .route("/search", get(search_meetings))
+            .route("/meetings/{id}/transcript", get(get_transcript))
+            .route("/meetings/{id}/summary", get(get_summary))
+            .route("/jobs/{id}", get(get_job))
             .fallback(|| async { error("NOT_FOUND", "Unknown automation endpoint") });
         let router = Router::new()
             .nest("/api/internal/v1", routes)
@@ -224,8 +229,113 @@ impl AutomationServer {
 }
 async fn health(State(state): State<GatewayState>) -> Json<serde_json::Value> {
     Json(
-        serde_json::json!({"protocol_version":1,"instance_id":state.discovery.instance_id,"capabilities":["gateway"]}),
+        serde_json::json!({"protocol_version":1,"instance_id":state.discovery.instance_id,"capabilities":["gateway","meeting_read","jobs"]}),
     )
+}
+fn page_request(uri: &Uri) -> Result<super::read_service::PageRequest, ApiError> {
+    let mut limit = None;
+    let mut cursor = None;
+    for (key, value) in url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes()) {
+        match key.as_ref() {
+            "limit" => {
+                if limit.is_some() {
+                    return Err(ApiError(EnhancementError::invalid(
+                        "limit must appear once",
+                    )));
+                }
+                limit = Some(value.parse::<usize>().map_err(|_| {
+                    ApiError(EnhancementError::invalid("limit must be an integer"))
+                })?);
+            }
+            "cursor" => {
+                if cursor.is_some() {
+                    return Err(ApiError(EnhancementError::invalid(
+                        "cursor must appear once",
+                    )));
+                }
+                cursor = Some(value.into_owned());
+            }
+            _ => {
+                return Err(ApiError(EnhancementError::invalid(
+                    "unknown query parameter",
+                )))
+            }
+        }
+    }
+    Ok(super::read_service::PageRequest { limit, cursor })
+}
+async fn list_meetings(
+    State(state): State<GatewayState>,
+    uri: Uri,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let page = super::read_service::MeetingReadService::new(state.pool)
+        .list(page_request(&uri)?)
+        .await?;
+    Ok(Json(serde_json::to_value(page).unwrap_or_default()))
+}
+async fn search_meetings(
+    State(state): State<GatewayState>,
+    uri: Uri,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut query = None;
+    let mut request = super::read_service::PageRequest::default();
+    for (key, value) in url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes()) {
+        match key.as_ref() {
+            "q" if query.is_none() => query = Some(value.into_owned()),
+            "limit" if request.limit.is_none() => {
+                request.limit = Some(value.parse().map_err(|_| {
+                    ApiError(EnhancementError::invalid("limit must be an integer"))
+                })?);
+            }
+            "cursor" if request.cursor.is_none() => request.cursor = Some(value.into_owned()),
+            "q" | "limit" | "cursor" => {
+                return Err(ApiError(EnhancementError::invalid(
+                    "query parameter must appear once",
+                )))
+            }
+            _ => {
+                return Err(ApiError(EnhancementError::invalid(
+                    "unknown query parameter",
+                )))
+            }
+        }
+    }
+    let query = query.ok_or_else(|| ApiError(EnhancementError::invalid("q is required")))?;
+    let page = super::read_service::MeetingReadService::new(state.pool)
+        .search(&query, request)
+        .await?;
+    Ok(Json(serde_json::to_value(page).unwrap_or_default()))
+}
+async fn get_transcript(
+    State(state): State<GatewayState>,
+    Path(id): Path<String>,
+    uri: Uri,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let page = super::read_service::MeetingReadService::new(state.pool)
+        .transcript(&id, page_request(&uri)?)
+        .await?;
+    Ok(Json(serde_json::to_value(page).unwrap_or_default()))
+}
+async fn get_summary(
+    State(state): State<GatewayState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let doc = super::read_service::MeetingReadService::new(state.pool)
+        .summary(&id)
+        .await?;
+    Ok(Json(
+        serde_json::json!({"meeting_id":doc.meeting_id,"title":doc.title,"created_at":doc.created_at,"versions":doc.versions,"summary_markdown":doc.summary_markdown,"summary_stale":doc.summary_stale}),
+    ))
+}
+async fn get_job(
+    State(state): State<GatewayState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        super::read_service::MeetingReadService::new(state.pool)
+            .job(&id)
+            .await?,
+    ))
 }
 async fn guard(State(state): State<GatewayState>, mut request: Request, next: Next) -> Response {
     if !state.enabled.load(Ordering::SeqCst) {

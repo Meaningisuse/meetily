@@ -281,3 +281,208 @@ async fn only_explicit_enable_is_restored_after_restart() {
     restarted.restore_preference().await.unwrap();
     assert!(restarted.status().await.is_none());
 }
+
+#[tokio::test]
+async fn pagination_is_stable_and_search_is_bounded() {
+    use super::read_service::{MeetingReadService, PageRequest};
+    let pool = pool().await;
+    for id in ["a", "b", "c"] {
+        crate::meeting::tests::seed(&pool, id).await;
+    }
+    sqlx::query("UPDATE meetings SET created_at='2026-10-01T00:00:00Z'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let service = MeetingReadService::new(pool.clone());
+    let first = service
+        .list(PageRequest {
+            limit: Some(1),
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.items[0].id, "a");
+    sqlx::query("DELETE FROM meetings WHERE id='a'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let second = service
+        .list(PageRequest {
+            limit: Some(1),
+            cursor: first.next_cursor,
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.items[0].id, "b");
+    for i in 0..251 {
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time,audio_end_time) VALUES(?, 'b', ?, '10:00', ?, ?)").bind(format!("seg{i:03}")).bind(if i==250{"最后行动项 100%_literal".to_string()}else{"中文".repeat(200)}).bind(if i<250{Some((i/2) as f64)}else{None}).bind(if i<250{Some((i/2) as f64+1.0)}else{None}).execute(&pool).await.unwrap();
+    }
+    let mut cursor = None;
+    let mut ids = Vec::new();
+    loop {
+        let page = service
+            .transcript(
+                "b",
+                PageRequest {
+                    limit: Some(50),
+                    cursor,
+                },
+            )
+            .await
+            .unwrap();
+        ids.extend(page.items.iter().map(|s| s.id.clone()));
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(ids.len(), 251);
+    assert_eq!(
+        ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        251
+    );
+    assert_eq!(ids.last().unwrap(), "seg250");
+    assert!(service
+        .search(&"q".repeat(257), PageRequest::default())
+        .await
+        .is_err());
+    assert!(service.search("", PageRequest::default()).await.is_err());
+    assert!(service
+        .list(PageRequest {
+            limit: Some(201),
+            cursor: None
+        })
+        .await
+        .is_err());
+    let hits = service
+        .search("%_literal", PageRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(hits.items.len(), 1);
+    assert!(hits.items[0].snippet.contains("最后行动项"));
+    assert_eq!(hits.items[0].start_ms, None);
+    let hits = service
+        .search("中文", PageRequest::default())
+        .await
+        .unwrap();
+    assert!(hits.items.iter().all(|h| h.snippet.chars().count() <= 300));
+}
+#[tokio::test]
+async fn read_scope_cannot_read_keys_audio_or_paths() {
+    let folder = tempfile::tempdir().unwrap();
+    let pool = pool().await;
+    crate::meeting::tests::seed(&pool, "bounded").await;
+    sqlx::query("UPDATE meetings SET folder_path='/private/secret-recordings'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let clients = ClientService::new(pool.clone(), Arc::new(TestVault::default()));
+    let token = clients
+        .create(
+            "reader",
+            vec![Scope::Read],
+            chrono::Utc::now() + chrono::Duration::days(1),
+        )
+        .await
+        .unwrap();
+    let server = AutomationServer::new(pool, clients, folder.path().to_path_buf());
+    let discovery = server.start().await.unwrap();
+    let http = reqwest::Client::new();
+    let reply = http
+        .get(format!("{}/meetings", discovery.base_url))
+        .bearer_auth(&token.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), 200);
+    let body = reply.text().await.unwrap();
+    assert!(!body.contains("secret-recordings"));
+    assert!(!body.contains(&token.token));
+    for path in [
+        "settings",
+        "keys",
+        "audio",
+        "exports",
+        "exports/id/download",
+    ] {
+        assert_eq!(
+            http.get(format!("{}/{path}", discovery.base_url))
+                .bearer_auth(&token.token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+    }
+    let reply = http
+        .get(format!("{}/meetings?limit=999", discovery.base_url))
+        .bearer_auth(&token.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), 422);
+    let body: serde_json::Value = reply.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "INVALID_INPUT");
+    assert!(body["request_id"].is_string());
+    assert_eq!(
+        http.get(format!("{}/search?q=first&q=second", discovery.base_url))
+            .bearer_auth(&token.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        422
+    );
+    server.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn transcript_cursor_is_bound_to_transcript_revision() {
+    use super::read_service::{MeetingReadService, PageRequest};
+    let pool = pool().await;
+    crate::meeting::tests::seed(&pool, "versioned").await;
+    sqlx::query("INSERT INTO meeting_content_versions(meeting_id) VALUES('versioned')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (id, start) in [("one", 1.0), ("two", 2.0)] {
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time) VALUES(?, 'versioned', ?, ?, ?)")
+            .bind(id)
+            .bind(id)
+            .bind(id)
+            .bind(start)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let service = MeetingReadService::new(pool.clone());
+    let first = service
+        .transcript(
+            "versioned",
+            PageRequest {
+                limit: Some(1),
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    let cursor = first.next_cursor.unwrap();
+    sqlx::query(
+        "UPDATE meeting_content_versions SET transcript_revision=1 WHERE meeting_id='versioned'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let error = service
+        .transcript(
+            "versioned",
+            PageRequest {
+                limit: Some(1),
+                cursor: Some(cursor),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "CONFLICT");
+}
