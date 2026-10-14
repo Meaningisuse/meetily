@@ -712,6 +712,11 @@ pub fn run() {
             // Audio recovery commands (for transcript recovery feature)
             audio::incremental_saver::recover_audio_from_checkpoints,
             audio::catchup::recover_transcription_backlog,
+            automation::commands::automation_status,
+            automation::commands::automation_set_enabled,
+            automation::commands::automation_create_client,
+            automation::commands::automation_list_clients,
+            automation::commands::automation_revoke_client,
             audio::incremental_saver::cleanup_checkpoints,
             audio::incremental_saver::has_audio_checkpoints,
             console_utils::show_console,
@@ -851,6 +856,7 @@ pub fn run() {
                     tauri::async_runtime::block_on(async {
                         // Clean up database connection and checkpoint WAL
                         if let Some(app_state) = _app_handle.try_state::<state::AppState>() {
+                            if let Err(e)=app_state.automation.stop().await {log::error!("Automation shutdown failed: {e}");}
                             log::info!("Starting database cleanup...");
                             if let Err(e) = app_state.db_manager.cleanup().await {
                                 log::error!("Failed to cleanup database: {}", e);
@@ -875,3 +881,5 @@ pub fn run() {
             }
         });
 }
+
+pub mod automation;

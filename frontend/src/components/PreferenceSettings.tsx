@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState, useRef } from "react"
+import { AutomationSettings } from "./AutomationSettings"
 import { Switch } from "./ui/switch"
 import { FolderOpen } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
@@ -219,6 +220,8 @@ export function PreferenceSettings() {
           </p>
         </div>
       </div>
+
+      <AutomationSettings />
 
       {/* Analytics Section */}
       <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
