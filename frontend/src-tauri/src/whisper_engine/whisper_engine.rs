@@ -1338,6 +1338,63 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::time::{timeout, Duration};
 
+    /// Run manually with a multilingual Whisper model and generated Chinese
+    /// speech fixture supplied through environment variables. This exercises
+    /// the production engine path without checking model weights or audio in.
+    #[tokio::test]
+    #[ignore = "requires WHISPER_TIMING_TEST_MODEL and WHISPER_TIMING_TEST_AUDIO"]
+    async fn timestamp_decode_preserves_synthetic_chinese_tail() {
+        let model_path = std::env::var("WHISPER_TIMING_TEST_MODEL")
+            .expect("set WHISPER_TIMING_TEST_MODEL to a multilingual GGML model");
+        let audio_path = std::env::var("WHISPER_TIMING_TEST_AUDIO")
+            .expect("set WHISPER_TIMING_TEST_AUDIO to a generated Chinese WAV fixture");
+        let engine = WhisperEngine::new_with_models_dir(None).unwrap();
+        let cpu_context = WhisperContext::new_with_params(
+            &model_path,
+            WhisperContextParameters {
+                use_gpu: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        *engine.current_context.write().await = Some(cpu_context);
+        *engine.current_model.write().await = Some("tiny-test-fixture".into());
+
+        let audio = crate::audio::decoder::decode_audio_file(std::path::Path::new(&audio_path))
+            .unwrap()
+            .to_whisper_format();
+        let (canonical_text, _, _, _) = engine
+            .transcribe_audio_with_mode(audio.clone(), Some("zh".into()), false)
+            .await
+            .unwrap();
+        let (timestamp_text, _, _, raw_segments) = engine
+            .transcribe_audio_with_mode(audio.clone(), Some("zh".into()), true)
+            .await
+            .unwrap();
+        let (text, _, _, timed_segments, precision) = engine
+            .transcribe_audio_with_verified_timing(audio.clone(), Some("zh".into()))
+            .await
+            .unwrap();
+        eprintln!(
+            "canonical={canonical_text:?} timestamp_pass={timestamp_text:?} raw_segments={raw_segments:?} verified={text:?} precision={precision:?} timed_segments={timed_segments:?}"
+        );
+
+        assert_eq!(text, canonical_text, "the timing pass must never replace canonical text");
+        if precision == TimingPrecision::Exact {
+            assert!(!timed_segments.is_empty());
+            let timed_text = timed_segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<String>();
+            assert_eq!(
+                timed_text.trim_end_matches(['。', '.']),
+                canonical_text.replace(' ', "")
+            );
+        } else {
+            assert!(timed_segments.is_empty());
+        }
+    }
+
     fn tiny_model(models: &[ModelInfo]) -> &ModelInfo {
         models
             .iter()

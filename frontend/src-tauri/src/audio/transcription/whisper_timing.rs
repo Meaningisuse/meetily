@@ -18,7 +18,8 @@ pub(crate) fn timing_or_unavailable<E>(
 
 /// Convert whisper.cpp's centisecond segment offsets to milliseconds only when
 /// all ranges are valid and the timed segment text exactly accounts for the
-/// canonical transcript (ignoring whitespace differences between segments).
+/// canonical transcript (ignoring whitespace between CJK segments and final
+/// sentence punctuation differences).
 pub(crate) fn verify_whisper_timed_segments(
     canonical_text: &str,
     segments: &[WhisperSegmentTicks],
@@ -29,6 +30,7 @@ pub(crate) fn verify_whisper_timed_segments(
     }
 
     let normalize_transcript = |text: &str| {
+        let text = trim_terminal_punctuation(text);
         let mut normalized = String::with_capacity(text.len());
         let mut previous_non_space = None;
         let mut pending_space = false;
@@ -80,6 +82,45 @@ pub(crate) fn verify_whisper_timed_segments(
 
     let combined = timed_text.join(" ");
     (normalize_transcript(&combined) == normalize_transcript(canonical_text)).then_some(timed)
+}
+
+fn trim_terminal_punctuation(text: &str) -> &str {
+    let mut end = text.len();
+    for (index, ch) in text.char_indices().rev() {
+        if ch.is_whitespace() || is_terminal_punctuation(ch) {
+            end = index;
+        } else {
+            break;
+        }
+    }
+    &text[..end]
+}
+
+fn is_terminal_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '.' | ','
+            | '!'
+            | '?'
+            | ';'
+            | ':'
+            | '。'
+            | '，'
+            | '！'
+            | '？'
+            | '；'
+            | '：'
+            | '、'
+            | '…'
+            | '”'
+            | '’'
+            | '」'
+            | '』'
+            | '）'
+            | '】'
+            | '》'
+            | '〉'
+    )
 }
 
 fn is_cjk(ch: char) -> bool {
@@ -171,6 +212,17 @@ mod tests {
             1000,
         )
         .is_some());
+    }
+
+    #[test]
+    fn final_sentence_punctuation_may_differ_without_changing_timed_text() {
+        assert!(verify_whisper_timed_segments(
+            "会议最后一句",
+            &[segment("会议最后一句。", 0, 50)],
+            1000,
+        )
+        .is_some());
+        assert!(verify_whisper_timed_segments("can't", &[segment("cant", 0, 50)], 1000,).is_none());
     }
 
     #[test]
