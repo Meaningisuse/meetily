@@ -25,6 +25,7 @@ pub struct TimestampedResult {
     pub text: String,
     pub timestamps: Vec<f32>,
     pub tokens: Vec<String>,
+    pub audio_duration_ms: i64,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -336,10 +337,15 @@ impl ParakeetModel {
 
         // Decode for each batch item
         let mut results = Vec::new();
-        for (encodings, &encodings_len) in encoder_out.outer_iter().zip(encoder_out_lens.iter()) {
+        for ((encodings, &encodings_len), &audio_samples) in encoder_out
+            .outer_iter()
+            .zip(encoder_out_lens.iter())
+            .zip(waveforms_len.iter())
+        {
             let (tokens, timestamps) =
                 self.decode_sequence(&encodings.view(), encodings_len as usize)?;
-            let result = self.decode_tokens(tokens, timestamps);
+            let audio_duration_ms = (audio_samples as f64 / 16_000.0 * 1000.0).round() as i64;
+            let result = self.decode_tokens(tokens, timestamps, audio_duration_ms);
             results.push(result);
         }
 
@@ -436,7 +442,12 @@ impl ParakeetModel {
         Ok((tokens, timestamps))
     }
 
-    fn decode_tokens(&self, ids: Vec<i32>, timestamps: Vec<usize>) -> TimestampedResult {
+    fn decode_tokens(
+        &self,
+        ids: Vec<i32>,
+        timestamps: Vec<usize>,
+        audio_duration_ms: i64,
+    ) -> TimestampedResult {
         let tokens: Vec<String> = ids
             .iter()
             .filter_map(|&id| {
@@ -471,6 +482,7 @@ impl ParakeetModel {
             text,
             timestamps: float_timestamps,
             tokens,
+            audio_duration_ms,
         }
     }
 

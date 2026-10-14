@@ -373,11 +373,18 @@ async fn run_retranscription<R: Runtime>(
         // Transcribe this segment
         let (text, conf, timed_segments, timing_precision) = if use_parakeet {
             let engine = parakeet_engine.as_ref().unwrap();
-            let text = engine
-                .transcribe_audio(segment.samples.clone())
+            let result = engine
+                .transcribe_audio_with_timestamps(segment.samples.clone())
                 .await
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32, Vec::new(), TimingPrecision::Unavailable)
+            let (timed, precision) =
+                crate::audio::transcription::parakeet_provider::token_timestamps_to_segments(
+                    &result.text,
+                    &result.tokens,
+                    &result.timestamps,
+                    result.audio_duration_ms,
+                );
+            (result.text, 0.9f32, timed, precision)
         } else {
             let engine = whisper_engine.as_ref().unwrap();
             let (text, conf, _, timed, precision) = engine
@@ -396,13 +403,13 @@ async fn run_retranscription<R: Runtime>(
                 i + 1, processable_count, segment_duration_sec, conf,
                 if trimmed.len() > 80 { let mut end = 80; while !trimmed.is_char_boundary(end) { end -= 1; } &trimmed[..end] } else { trimmed }
             );
-            if timing_precision == TimingPrecision::Exact && !timed_segments.is_empty() {
+            if timing_precision != TimingPrecision::Unavailable && !timed_segments.is_empty() {
                 for timed in timed_segments {
                     all_transcripts.push(TranscriptInput {
                         text: timed.text,
                         start_ms: segment.start_timestamp_ms + timed.start_ms as f64,
                         end_ms: segment.start_timestamp_ms + timed.end_ms as f64,
-                        timing_precision: TimingPrecision::Exact,
+                        timing_precision,
                     });
                 }
             } else {

@@ -238,11 +238,19 @@ pub fn start_transcription_task<R: Runtime>(
                                             audio_start_time,
                                             audio_end_time,
                                             duration: chunk_duration,
-                                            timing_precision: TimingPrecision::from_audio_bounds(
-                                                Some(audio_start_time),
-                                                Some(audio_end_time),
-                                            ),
-                                            timed_segments: if provider_precision == TimingPrecision::Exact {
+                                            timing_precision: if !timed_segments.is_empty()
+                                                && provider_precision != TimingPrecision::Unavailable
+                                            {
+                                                provider_precision
+                                            } else {
+                                                TimingPrecision::from_audio_bounds(
+                                                    Some(audio_start_time),
+                                                    Some(audio_end_time),
+                                                )
+                                            },
+                                            timed_segments: if !timed_segments.is_empty()
+                                                && provider_precision != TimingPrecision::Unavailable
+                                            {
                                                 let offset_ms = (chunk_timestamp * 1000.0).round() as i64;
                                                 timed_segments.into_iter().map(|mut timed| {
                                                     timed.start_ms = timed.start_ms.saturating_add(offset_ms);

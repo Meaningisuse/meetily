@@ -70,7 +70,7 @@ pub(crate) fn transcript_update_segments(
                 confidence: update.confidence,
                 sequence_id: update.sequence_id,
                 segment_index: index as u32,
-                timing_precision: super::transcription::provider::TimingPrecision::Exact,
+                timing_precision: update.timing_precision,
             }
         })
         .collect()
@@ -686,7 +686,10 @@ mod history_tail_tests {
         assert_eq!(segments[1].text, "最后行动项");
         assert_eq!(segments[1].audio_start_time, 13.0);
         assert_eq!(segments[1].audio_end_time, 13.9);
-        assert_eq!(segments[1].timing_precision, super::super::transcription::provider::TimingPrecision::Exact);
+        assert_eq!(
+            segments[1].timing_precision,
+            super::super::transcription::provider::TimingPrecision::Approximate
+        );
         assert_eq!(segments[0].sequence_id, segments[1].sequence_id);
         assert_ne!(segments[0].segment_index, segments[1].segment_index);
     }

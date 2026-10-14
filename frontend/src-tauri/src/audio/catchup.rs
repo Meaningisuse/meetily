@@ -81,11 +81,16 @@ pub async fn recover_transcription_backlog(
                 audio_start_time: start,
                 audio_end_time: start + duration,
                 duration,
-                timing_precision: TimingPrecision::from_audio_bounds(
-                    Some(start),
-                    Some(start + duration),
-                ),
-                timed_segments: if provider_precision == TimingPrecision::Exact {
+                timing_precision: if !timed_segments.is_empty()
+                    && provider_precision != TimingPrecision::Unavailable
+                {
+                    provider_precision
+                } else {
+                    TimingPrecision::from_audio_bounds(Some(start), Some(start + duration))
+                },
+                timed_segments: if !timed_segments.is_empty()
+                    && provider_precision != TimingPrecision::Unavailable
+                {
                     let offset_ms = (start * 1000.0).round() as i64;
                     for timed in &mut timed_segments {
                         timed.start_ms = timed.start_ms.saturating_add(offset_ms);

@@ -109,3 +109,5 @@ P4候选后续验证：在临时目录构建 MIT moss-transcribe.cpp（source `1
 
 
 P4 Sortformer 分组与长时资源门禁补测（2026-10-14）：19场中2人组（8场）DER 1.23% micro/1.24% macro、overlap 1.36%/1.35%；3人组（4场）7.94%/8.12%、overlap 9.73%/9.94%；4人组（7场）5.39%/5.82%、overlap 13.28%/13.18%。另将公开AliMeeting Test sample-01拼接四次、段间加5秒静音生成单个138.018分钟mono WAV作资源压力测试（不是自然两小时会议质量评测）：Apple M5 Metal干净退出，3,239段/4个speaker label，253.23秒、RTF 0.0306；峰值RSS 3,026,321,408字节（2.82 GiB），peak memory footprint 3,087,453,184字节（2.88 GiB），超过2 GiB门槛。另测CLI运行5秒后收到SIGINT，0.037秒退出、返回码-2且无RTTM；只证明OS信号可及时终止命令行进程，不代表Meetily应用内协作取消。Sortformer质量分数尚不能视为独立holdout，具体训练会议未公开核对；D1因内存门禁失败和训练数据重叠未澄清仍NO-GO，D3–D5未开始。
+
+P4/D2 Parakeet时间链路补充（2026-10-14）：接通现有TDT token emission times，在实时录音、catch-up、导入和重转写中生成并保留词段 `approximate` 时间；非法、越界或切分后不能还原canonical文本时整组保持 `unavailable`。固定 revision `0bbb45a3365852604aef28b538a8f066f4ccaa85` 的 Parakeet v2 INT8 ONNX 权重只存于 `/private/tmp`。仓库内JFK英语样例模型烟测生成22个范围有效且文本一致的近似词段，未逐词对照标注，不能证明±250ms准确率；不代表中文效果。当前完整门禁Rust 331通过/0失败/6忽略；单独运行模型烟测通过。D2仍待独立标注边界评分和三入口试听，P4未完成。
