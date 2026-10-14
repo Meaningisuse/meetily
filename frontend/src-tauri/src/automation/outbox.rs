@@ -64,10 +64,19 @@ async fn secret(vault: std::sync::Arc<dyn Vault>, id: String) -> Result<String, 
 }
 
 async fn deliver(delivery: &Delivery, secret: &str) -> Result<u16, String> {
+    deliver_with_options(delivery, secret, &[], Duration::from_secs(10)).await
+}
+
+async fn deliver_with_options(
+    delivery: &Delivery,
+    secret: &str,
+    additional_roots: &[reqwest::Certificate],
+    timeout: Duration,
+) -> Result<u16, String> {
     let approved: Vec<String> = serde_json::from_str(&delivery.allowed_hosts_json)
         .map_err(|_| "Webhook allowlist is invalid".to_owned())?;
     let target = target_policy::resolve_and_validate(&delivery.url, &approved).await?;
-    let client = http_client(&target)?;
+    let client = http_client(&target, additional_roots, timeout)?;
     let timestamp = chrono::Utc::now().timestamp();
     let response = client
         .post(target.url)
@@ -99,12 +108,20 @@ async fn deliver(delivery: &Delivery, secret: &str) -> Result<u16, String> {
     Ok(status)
 }
 
-fn http_client(target: &target_policy::PinnedTarget) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+fn http_client(
+    target: &target_policy::PinnedTarget,
+    additional_roots: &[reqwest::Certificate],
+    timeout: Duration,
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
-        .timeout(Duration::from_secs(10))
-        .resolve_to_addrs(&target.host, &target.addresses)
+        .timeout(timeout)
+        .resolve_to_addrs(&target.host, &target.addresses);
+    for root in additional_roots {
+        builder = builder.add_root_certificate(root.clone());
+    }
+    builder
         .build()
         .map_err(|_| "Webhook client could not be configured".to_owned())
 }
@@ -182,6 +199,167 @@ pub async fn deliver_due(pool: SqlitePool, cancel: tokio_util::sync::Cancellatio
 #[cfg(test)]
 mod tests {
     use super::{finish, retry_after, Delivery};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn delivers_signed_event_to_local_https_receiver() {
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certificates = vec![rustls::pki_types::CertificateDer::from(
+            include_bytes!("../../tests/fixtures/webhook/localhost-cert.der").to_vec(),
+        )];
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(
+            include_bytes!("../../tests/fixtures/webhook/localhost-key.der").to_vec(),
+        );
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certificates, rustls::pki_types::PrivateKeyDer::Pkcs8(key))
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for status in [
+                Some("503 Service Unavailable"),
+                Some("200 OK"),
+                Some("401 Unauthorized"),
+                None,
+            ] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut stream = acceptor.accept(socket).await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0, "request ended before headers and body arrived");
+                    request.extend_from_slice(&chunk[..read]);
+                    if let Some(header_end) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        let headers = String::from_utf8_lossy(&request[..header_end]);
+                        let content_length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= header_end + 4 + content_length {
+                            break;
+                        }
+                    }
+                }
+                if let Some(status) = status {
+                    stream
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                } else {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                requests.push(request);
+            }
+            requests
+        });
+        let payload = r#"{"event_id":"evt-1","kind":"summary.completed"}"#;
+        let delivery = Delivery {
+            id: "delivery-1".into(),
+            event_id: "evt-1".into(),
+            attempts: 0,
+            payload: payload.into(),
+            url: format!("https://127.0.0.1:{}/hook", address.port()),
+            secret_ref: "test-secret".into(),
+            allowed_hosts_json: "[\"127.0.0.1\"]".into(),
+        };
+
+        let trusted_root = reqwest::Certificate::from_der(include_bytes!(
+            "../../tests/fixtures/webhook/localhost-cert.der"
+        ))
+        .unwrap();
+        let roots = [trusted_root];
+        let status_503 = super::deliver_with_options(
+            &delivery,
+            "test-secret-value",
+            &roots,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let status_200 = super::deliver_with_options(
+            &delivery,
+            "test-secret-value",
+            &roots,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let status_401 = super::deliver_with_options(
+            &delivery,
+            "test-secret-value",
+            &roots,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let timeout = super::deliver_with_options(
+            &delivery,
+            "test-secret-value",
+            &roots,
+            Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!([status_503, status_200, status_401], [503, 200, 401]);
+        assert_eq!(timeout.unwrap_err(), "Webhook request failed");
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 4);
+        for request in requests {
+            let request = String::from_utf8(request).unwrap();
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            assert_eq!(body, payload);
+            assert!(headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("x-meetily-event: evt-1")));
+            let timestamp = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("x-meetily-timestamp")
+                        .then(|| value.trim().parse::<i64>().unwrap())
+                })
+                .unwrap();
+            let signature = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("x-meetily-signature")
+                        .then(|| value.trim().to_owned())
+                })
+                .unwrap();
+            assert_eq!(
+                signature,
+                format!(
+                    "sha256={}",
+                    super::super::signing::signature(
+                        "test-secret-value",
+                        timestamp,
+                        body.as_bytes()
+                    )
+                )
+            );
+        }
+    }
 
     #[test]
     fn retries_initial_delivery_five_times_with_fixed_backoff() {
@@ -268,7 +446,7 @@ mod tests {
             host: "127.0.0.1".into(),
             addresses: vec![address],
         };
-        let response = super::http_client(&target)
+        let response = super::http_client(&target, &[], Duration::from_secs(10))
             .unwrap()
             .post(target.url)
             .body("{}")
