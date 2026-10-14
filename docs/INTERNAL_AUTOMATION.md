@@ -1,6 +1,6 @@
 # 本机自动化客户端
 
-`automation-client` 提供内部自用的 `meetily-internal` CLI 和 MCP stdio 服务。它只读取本机 Meetily 当前用户的会议、转录分页、已保存摘要及任务状态；不会提供录音、写入、导出、文件路径或模型密钥工具。Meetily 必须已打开，并在设置中显式启用本机自动化。
+`automation-client` 提供内部自用的 `meetily-internal` CLI 和 MCP stdio 服务。它读取本机 Meetily 当前用户的会议、转录分页、已保存摘要及任务状态；摘要任务和录音控制仅在单独的 write/record 客户端授权下可用。不会提供导出、文件路径或模型密钥工具。Meetily 必须已打开，并在设置中显式启用本机自动化。
 
 ## 凭据与连接
 
@@ -43,6 +43,14 @@ MEETILY_AUTOMATION_CLIENT_ID='<client-id>' node automation-client/dist/cli.js jo
 ```
 
 服务在 stdio 上只输出 MCP JSON-RPC 消息，诊断信息使用 stderr。注册的五个只读工具为 `list_meetings`、`search_meetings`、`get_transcript`、`get_summary`、`get_job`。它们按页返回，不自动扩展分页；主机关闭 Meetily 后会收到明确的本机实例不可用错误。
+
+## Webhook 接收
+
+在 Meetily 的“设置 → Local automation”中添加目标。地址必须为 HTTPS，并输入与URL主机完全匹配的批准项。Meetily 首次解析时校验并固定解析IP；每次投递会重新解析并拒绝未批准的新IP，不使用系统HTTP代理，也不跟随重定向。只有确实需要内网接收器时，才同时录入目标主机和精确IP。
+
+创建订阅时会生成随机签名密钥，写入 macOS Keychain，界面仅显示一次。接收端应把密钥放在自己的秘密存储中。请求正文是UTF-8 JSON，包含 `event_id`、`meeting_id`、`kind`、`revision`、`job_id` 和 `occurred_at`，不包含转录/摘要正文。请求头为 `X-Meetily-Event`、`X-Meetily-Timestamp` 和 `X-Meetily-Signature: sha256=<hex>`。签名输入为ASCII十进制时间戳、一个句点、随后是未经JSON重序列化的原始请求字节；使用HMAC-SHA256并以常量时间比较。接收端还应限制时间戳年龄，并将 `event_id` 作为唯一键落库，以处理重复投递。
+
+目前支持 `recording.stopped`、`transcript.completed`、`summary.completed` 与 `summary.failed`。摘要/转写事务提交后写入事件和各订阅投递行；故障后队列继续重试。2xx确认成功，429/5xx/网络问题最多再试5次，其他4xx终止；停用订阅会暂停待投递，重新启用可继续。`recording.stopped` 只说明录音文件已保存，不代表转写已完成。
 
 ## 验证
 

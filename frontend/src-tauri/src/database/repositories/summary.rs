@@ -137,6 +137,7 @@ impl SummaryProcessesRepository {
         .bind(started_at)
         .execute(&mut *transaction)
         .await?;
+        let mut completion_revision = None;
         if update.rows_affected() == 1 {
             let versions = crate::database::repositories::content_version::bump(
                 &mut transaction,
@@ -144,6 +145,7 @@ impl SummaryProcessesRepository {
                 crate::database::repositories::content_version::ContentKind::Summary,
             )
             .await?;
+            completion_revision = Some(versions.revision);
             let markdown = crate::meeting::normalize::summary_markdown(&result_str);
             sqlx::query("INSERT INTO meeting_document_content(meeting_id,summary_markdown,summary_source_transcript_revision,summary_source_speaker_revision) VALUES(?,?,?,?) ON CONFLICT(meeting_id) DO UPDATE SET summary_markdown=excluded.summary_markdown,summary_source_transcript_revision=excluded.summary_source_transcript_revision,summary_source_speaker_revision=excluded.summary_source_speaker_revision")
                 .bind(meeting_id).bind(markdown).bind(versions.transcript_revision).bind(versions.speaker_revision).execute(&mut *transaction).await?;
@@ -154,6 +156,18 @@ impl SummaryProcessesRepository {
                     .bind(id).bind(source_revision).bind(&result_str).bind(now).execute(&mut *transaction).await?;
                 sqlx::query("UPDATE enhancement_jobs SET status='succeeded',progress=1,error_code=NULL,updated_at=? WHERE id=? AND status='running'")
                     .bind(now).bind(id).execute(&mut *transaction).await?;
+                if let Some(revision) = completion_revision {
+                    crate::automation::events::append(
+                        &mut transaction,
+                        &crate::automation::events::DomainEvent::new(
+                            meeting_id,
+                            "summary.completed",
+                            revision,
+                            Some(id),
+                        ),
+                    )
+                    .await?;
+                }
             }
             // Generated titles share the completion transaction and source check.
             if let Some(name) = result
@@ -253,7 +267,23 @@ impl SummaryProcessesRepository {
             .bind(status).bind(message).bind(now).bind(now).bind(restore).bind(meeting_id).bind(started_at).execute(&mut *conn).await?;
         if let Some((id, _)) = job {
             sqlx::query("UPDATE enhancement_jobs SET status=?,error_code=?,updated_at=? WHERE id=? AND status IN ('queued','running')")
-                .bind(status).bind(code).bind(now).bind(id).execute(&mut *conn).await?;
+                .bind(status).bind(code).bind(now).bind(&id).execute(&mut *conn).await?;
+            if status == "failed" && update.rows_affected() == 1 {
+                let revision =
+                    crate::database::repositories::content_version::read(conn, meeting_id)
+                        .await?
+                        .revision;
+                crate::automation::events::append(
+                    conn,
+                    &crate::automation::events::DomainEvent::new(
+                        meeting_id,
+                        "summary.failed",
+                        revision,
+                        Some(&id),
+                    ),
+                )
+                .await?;
+            }
         }
         Ok(update.rows_affected() == 1)
     }
@@ -291,6 +321,97 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn seed_running_summary_job(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        started_at: DateTime<Utc>,
+        job_id: &str,
+    ) {
+        seed_pending(pool, meeting_id, started_at, None, None).await;
+        let mut tx = pool.begin().await.unwrap();
+        crate::database::repositories::content_version::initialize(&mut tx, meeting_id)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        sqlx::query("INSERT INTO enhancement_jobs(id,meeting_id,kind,status,source_revision,params_json,created_at,updated_at) VALUES(?,?,'summary','running',0,'{}',?,?)")
+            .bind(job_id).bind(meeting_id).bind(started_at).bind(started_at)
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO summary_job_context(meeting_id,started_at,job_id) VALUES(?,?,?)")
+            .bind(meeting_id)
+            .bind(started_at)
+            .bind(job_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn summary_result_and_event_commit_or_rollback_together() {
+        let pool = test_pool().await;
+        let started = Utc::now();
+        seed_running_summary_job(&pool, "event-completion", started, "event-job").await;
+        sqlx::query("INSERT INTO automation_webhooks(id,url,secret_ref,allowed_hosts_json,kinds_json,enabled,created_at) VALUES('broken-filter','https://example.test/hook','secret','[]','{',1,?)")
+            .bind(started.timestamp()).execute(&pool).await.unwrap();
+
+        let result = SummaryProcessesRepository::update_process_completed(
+            &pool,
+            "event-completion",
+            started,
+            json!({"markdown":"complete"}),
+            1,
+            1.0,
+        )
+        .await;
+        assert!(result.is_err());
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM summary_processes WHERE meeting_id='event-completion'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let job_status: String =
+            sqlx::query_scalar("SELECT status FROM enhancement_jobs WHERE id='event-job'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM automation_events WHERE meeting_id='event-completion'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "PENDING");
+        assert_eq!(job_status, "running");
+        assert_eq!(events, 0);
+
+        sqlx::query("DELETE FROM automation_webhooks WHERE id='broken-filter'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before_retry: (String, String, i64) = sqlx::query_as("SELECT s.status,j.status,j.source_revision FROM summary_processes s JOIN summary_job_context c ON c.meeting_id=s.meeting_id JOIN enhancement_jobs j ON j.id=c.job_id WHERE s.meeting_id='event-completion'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(before_retry.0, "PENDING");
+        assert_eq!(before_retry.1, "running");
+        assert_eq!(before_retry.2, 0);
+        assert!(SummaryProcessesRepository::update_process_completed(
+            &pool,
+            "event-completion",
+            started,
+            json!({"markdown":"complete"}),
+            1,
+            1.0,
+        )
+        .await
+        .unwrap());
+        let event: (String, String) = sqlx::query_as(
+            "SELECT kind,job_id FROM automation_events WHERE meeting_id='event-completion'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(event, ("summary.completed".into(), "event-job".into()));
     }
 
     #[tokio::test]

@@ -256,7 +256,8 @@ export function useRecordingStop(
           const responseData = await storageService.saveMeeting(
             savedMeetingName || meetingTitle || 'New Meeting',  // PREFER savedMeetingName (backend source)
             freshTranscripts,
-            folderPath
+            folderPath,
+            true
           );
 
           const meetingId = responseData.meeting_id;

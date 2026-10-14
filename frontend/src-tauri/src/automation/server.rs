@@ -41,6 +41,7 @@ struct Running {
     cancel: CancellationToken,
     enabled: Arc<AtomicBool>,
     handle: tokio::task::JoinHandle<()>,
+    dispatcher: tokio::task::JoinHandle<()>,
 }
 #[derive(Clone)]
 pub struct AutomationServer {
@@ -206,6 +207,11 @@ impl AutomationServer {
             .layer(middleware::from_fn_with_state(state.clone(), guard))
             .with_state(state);
         let cancel = CancellationToken::new();
+        let dispatch_cancel = cancel.clone();
+        let dispatch_pool = self.pool.clone();
+        let dispatcher = tokio::spawn(async move {
+            super::outbox::deliver_due(dispatch_pool, dispatch_cancel).await;
+        });
         let shutdown = cancel.clone();
         let active = enabled.clone();
         let root = self.root.clone();
@@ -225,6 +231,7 @@ impl AutomationServer {
             cancel,
             enabled,
             handle,
+            dispatcher,
         });
         Ok(value)
     }
@@ -236,6 +243,9 @@ impl AutomationServer {
             r.handle
                 .await
                 .map_err(|_| EnhancementError::new("IO_ERROR", "Listener shutdown failed"))?;
+            r.dispatcher.await.map_err(|_| {
+                EnhancementError::new("IO_ERROR", "Webhook dispatcher shutdown failed")
+            })?;
             discovery::remove_owned(&self.root, &r.discovery.instance_id)?;
         }
         Ok(())

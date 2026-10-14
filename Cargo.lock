@@ -3707,6 +3707,7 @@ dependencies = [
  "futures",
  "futures-channel",
  "futures-util",
+ "hmac",
  "infer 0.15.0",
  "keyring",
  "lazy_static",

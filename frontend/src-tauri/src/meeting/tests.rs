@@ -165,6 +165,69 @@ async fn enhancement_migrations_preserve_existing_rows() {
 }
 
 #[tokio::test]
+async fn transcript_completion_event_is_atomic_with_transcript_persistence() {
+    let pool = pool().await;
+    sqlx::query("INSERT INTO automation_webhooks(id,url,secret_ref,allowed_hosts_json,kinds_json,enabled,created_at) VALUES('broken-filter','https://example.test/hook','secret','[]','{',1,?)")
+        .bind(chrono::Utc::now().timestamp()).execute(&pool).await.unwrap();
+    let segment = crate::api::TranscriptSegment {
+        id: "segment-1".into(),
+        text: "事务测试".into(),
+        timestamp: "00:00:01".into(),
+        audio_start_time: Some(1.0),
+        audio_end_time: Some(2.0),
+        duration: Some(1.0),
+    };
+    assert!(
+        crate::database::repositories::transcript::TranscriptsRepository::save_recorded_transcript(
+            &pool,
+            "事务会议",
+            std::slice::from_ref(&segment),
+            None,
+        )
+        .await
+        .is_err()
+    );
+    let meetings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM automation_events")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(meetings, 0);
+    assert_eq!(events, 0);
+
+    sqlx::query("DELETE FROM automation_webhooks WHERE id='broken-filter'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let meeting_id =
+        crate::database::repositories::transcript::TranscriptsRepository::save_recorded_transcript(
+            &pool,
+            "事务会议",
+            std::slice::from_ref(&segment),
+            None,
+        )
+        .await
+        .unwrap();
+    let event_rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT kind,revision FROM automation_events WHERE meeting_id=? ORDER BY rowid",
+    )
+    .bind(meeting_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        event_rows,
+        vec![
+            ("transcript.completed".into(), 1),
+            ("recording.stopped".into(), 1),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn legacy_writes_advance_versions_and_invalidate_summary_source() {
     use crate::database::repositories::{
         meeting::MeetingsRepository, summary::SummaryProcessesRepository,

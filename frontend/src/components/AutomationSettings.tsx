@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Switch } from './ui/switch';
+import { WebhookSettings } from './WebhookSettings';
 type Discovery = { pid: number; instance_id: string; base_url: string; protocol_version: number };
 type Client = { id: string; name: string; scopes: string[]; expires_at: number; revoked: boolean };
 const errorText = (error: unknown) => typeof error === 'object' && error !== null && 'message' in error ? String(error.message) : String(error);
@@ -23,6 +24,7 @@ export function AutomationSettings({ invokeNative = invoke }: { invokeNative?: t
   <p className="text-sm text-gray-600">Off by default. Create separate least-privilege credentials for each client. {scopeDisclosure}</p>
   {error&&<p role="alert" className="text-sm text-red-700">{error}</p>}
   {discovery&&<><p className="text-sm break-all">Local endpoint: <code>{discovery.base_url}</code></p>
+   <WebhookSettings invokeNative={invokeNative}/>
    <div className="flex flex-wrap gap-2"><input aria-label="Client name" value={name} maxLength={100} onChange={e=>setName(e.target.value)} placeholder="Client name" className="border rounded px-3 py-2"/><select aria-label="Client permission" value={scope} onChange={e=>setScope(e.target.value as 'read'|'write'|'record')} className="border rounded px-2"><option value="read">Read</option><option value="write">Write</option><option value="record">Record</option></select><select aria-label="Credential expiry" value={days} onChange={e=>setDays(Number(e.target.value))} className="border rounded px-2"><option value={1}>1 day</option><option value={7}>7 days</option><option value={30}>30 days</option></select><button disabled={busy||!name.trim()} onClick={create} className="border rounded px-3 py-2 disabled:opacity-50">Create {scope} client</button></div>
    {oneTime&&<div className="border border-amber-300 rounded p-3 space-y-2"><p>Copy this credential now. It is shown only once and is also stored in your system Keychain.</p><p className="text-sm">Client ID: {oneTime.client.id}</p><textarea aria-label="One-time credential" readOnly value={oneTime.token} className="w-full border rounded p-2 font-mono"/><button onClick={()=>setOneTime(null)} className="border rounded px-3 py-1">I have saved it</button></div>}
   </>}

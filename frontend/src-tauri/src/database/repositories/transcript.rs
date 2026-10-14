@@ -16,6 +16,25 @@ impl TranscriptsRepository {
         transcripts: &[TranscriptSegment],
         folder_path: Option<String>,
     ) -> Result<String, SqlxError> {
+        Self::save_transcript_inner(pool, meeting_title, transcripts, folder_path, false).await
+    }
+
+    pub async fn save_recorded_transcript(
+        pool: &SqlitePool,
+        meeting_title: &str,
+        transcripts: &[TranscriptSegment],
+        folder_path: Option<String>,
+    ) -> Result<String, SqlxError> {
+        Self::save_transcript_inner(pool, meeting_title, transcripts, folder_path, true).await
+    }
+
+    async fn save_transcript_inner(
+        pool: &SqlitePool,
+        meeting_title: &str,
+        transcripts: &[TranscriptSegment],
+        folder_path: Option<String>,
+        recording_stopped: bool,
+    ) -> Result<String, SqlxError> {
         let meeting_id = format!("meeting-{}", Uuid::new_v4());
 
         let mut conn = pool.acquire().await?;
@@ -76,9 +95,34 @@ impl TranscriptsRepository {
             meeting_id
         );
 
-        crate::database::repositories::content_version::bump(
-            &mut transaction, &meeting_id, crate::database::repositories::content_version::ContentKind::Transcript
-        ).await?;
+        let versions = crate::database::repositories::content_version::bump(
+            &mut transaction,
+            &meeting_id,
+            crate::database::repositories::content_version::ContentKind::Transcript,
+        )
+        .await?;
+        crate::automation::events::append(
+            &mut transaction,
+            &crate::automation::events::DomainEvent::new(
+                &meeting_id,
+                "transcript.completed",
+                versions.revision,
+                None,
+            ),
+        )
+        .await?;
+        if recording_stopped {
+            crate::automation::events::append(
+                &mut transaction,
+                &crate::automation::events::DomainEvent::new(
+                    &meeting_id,
+                    "recording.stopped",
+                    versions.revision,
+                    None,
+                ),
+            )
+            .await?;
+        }
 
         // Commit the transaction
         transaction.commit().await?;
