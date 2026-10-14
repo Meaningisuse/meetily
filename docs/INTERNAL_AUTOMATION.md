@@ -48,7 +48,21 @@ MEETILY_AUTOMATION_CLIENT_ID='<client-id>' node automation-client/dist/cli.js jo
 
 ChatGPT 自定义 MCP app 不直接连接本机 stdio 服务。OpenAI Secure MCP Tunnel 可让本机 `tunnel-client` 通过出站 HTTPS 连接 OpenAI，再把 MCP 请求转发给本机 stdio 命令；Meetily 服务仍只监听 loopback，不需开放入站端口或公网地址。连接需要 Platform `tunnel_id`、供 `tunnel-client` 使用的 runtime API key、Platform 组织的 Tunnels Read + Use 权限，以及 ChatGPT 工作区允许添加自定义 MCP server；创建或修改 tunnel 另需 Tunnels Read + Manage。[Secure MCP Tunnel 指南](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) · [ChatGPT MCP 开发者模式说明](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)
 
-Meetily MCP 客户端当前仅公开五个只读工具，适合 ChatGPT Pro 的 read/fetch 权限。摘要写入、任务取消和录音控制不通过 Pro MCP 提供；OpenAI 文档目前将完整 MCP 写操作列为 Business、Enterprise 和 Edu 工作区的 beta 能力。`tunnel-client` 的管理与凭据配置尚未完成，不能把本机 stdio 单独配置当成 ChatGPT 已连接。[Secure MCP Tunnel 权限与接入](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) · [ChatGPT MCP 计划与权限说明](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)
+Meetily MCP 客户端当前仅公开五个只读工具，适合 ChatGPT Pro 的 read/fetch 权限。摘要写入、任务取消和录音控制不通过 Pro MCP 提供；OpenAI 文档目前将完整 MCP 写操作列为 Business、Enterprise 和 Edu 工作区的 beta 能力。
+
+### 用 Secure MCP Tunnel 启动本机只读服务
+
+从[官方 tunnel-client 发布页](https://github.com/openai/tunnel-client/releases)安装 `tunnel-client`，在 ChatGPT 工作区创建/授权自定义 MCP app，并在 Platform 组织中取得 Tunnels Read + Use 权限。运行以下准备命令；把示例值替换为 Platform tunnel ID 与 Meetily 设置页显示的只读 client ID：
+
+```sh
+pnpm --dir automation-client install --frozen-lockfile
+pnpm --dir automation-client build
+export CONTROL_PLANE_TUNNEL_ID='tunnel_...'
+export MEETILY_AUTOMATION_CLIENT_ID='...'
+scripts/meetily-chatgpt-tunnel.sh
+```
+
+启动器会在当前终端静默提示输入 OpenAI runtime API key；也可由调用进程安全注入 `CONTROL_PLANE_API_KEY`。key 不放在命令参数或配置文件中。脚本以 `--mcp.command` 启动已构建的 Meetily MCP stdio 服务，客户端再从 macOS Keychain 读取对应的 Meetily read token。Meetily 必须保持运行并启用 Local automation。每个 tunnel ID 同时只能运行一个使用 stdio binding 的 `tunnel-client` 实例；结束进程即可断开。自动化测试使用假的 tunnel-client 校验参数与 key 隔离，不能代替真实 Platform/ChatGPT 连通验收。[Secure MCP Tunnel 操作说明](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) · [tunnel-client 官方说明](https://github.com/openai/tunnel-client)
 
 ## Webhook 接收
 

@@ -66,7 +66,7 @@ P0工程任务已落地；真实两小时设备采集、设备断开/磁盘满/�
 
 新增独立 `automation-client` TypeScript 包，采用官方 MCP TypeScript Server SDK `@modelcontextprotocol/server` 2.3.1。CLI/MCP 都通过 app-data discovery 验证活动 loopback 实例，然后使用 macOS Keychain 中按 client ID 查找的凭据；一次性令牌不作为命令行参数。CLI 提供会议列表、搜索、转录分页、摘要与任务状态读取，stdout只输出JSON；MCP stdio注册相同五种只读工具，不提供shell、写入、录音或导出工具。新增 `docs/INTERNAL_AUTOMATION.md` 说明如何手工配置所选助手，不自动改动外部主机配置。
 
-验证：包锁文件安装、TypeScript编译和5项 Bun 测试通过；包括陈旧实例、loopback 地址约束、CLI退出码/凭据隔离，以及MCP stdio仅列出五项只读工具的协议测试。统一前端门禁测试包括该包的锁文件安装、编译和测试。用户已选择 ChatGPT；OpenAI Secure MCP Tunnel 可通过本机出站客户端连接私有 stdio MCP，无需公网暴露。实际连接仍待 tunnel_id/runtime API key、Platform Tunnels Read + Use 权限及 ChatGPT 工作区权限；本轮未读取会议或既有Keychain项目。Pro MCP 仅提供 read/fetch，因此目前五个只读工具可接入，A4 写入/录音能力不能通过 Pro MCP 使用。
+验证：包锁文件安装、TypeScript编译和5项 Bun 测试通过；包括陈旧实例、loopback 地址约束、CLI退出码/凭据隔离，以及MCP stdio仅列出五项只读工具的协议测试。新增 Secure MCP Tunnel 启动脚本，伪造 tunnel-client 的参数回归通过，runtime API key只通过环境变量传递且不进入argv。用户已选择 ChatGPT；官方 Secure MCP Tunnel 可通过本机出站客户端连接私有 stdio MCP，无需公网暴露。实际连接仍待 tunnel_id/runtime API key、Platform Tunnels Read + Use 权限及 ChatGPT 工作区权限；本轮未读取会议或既有Keychain项目。Pro MCP 仅提供 read/fetch，因此目前五个只读工具可接入，A4 写入/录音能力不能通过 Pro MCP 使用。
 
 ### P3 / A4：分权限幂等写入与录音控制
 
