@@ -33,15 +33,17 @@ cargo run --locked -p meetily --example processing_stress -- /path/to/ggml-tiny.
 | 真实磁盘满 | 已接受输入保留、预算满/坏存储目标注入测试 | 待现场验收 |
 | 强制退出后真实会议恢复 | 重启pending/校验/去重/恢复UI测试 | 待现场验收 |
 | 中文长会议摘要质量 | 中文预算及尾行动项mock HTTP回归 | 待真实会议验收 |
-| 中文说话人效果 | 本机已确认，标注数据未提供 | P4效果门禁待验证 |
+| 中文说话人效果 | 尚无获准的本地标注数据和独立留出集 | P4效果门禁待验证 |
 
 P0工程任务完成不意味着上述实际运行/业务验收已完成。P3、P4另按各任务验证并提交，不越过效果门禁宣称Pro对齐全部完成。
 
 ## 2026-10-14 本轮重新验证
 
-- `scripts/check-enhancement.sh --all`：Node行为回归17通过；Bun前端57通过；TypeScript检查、Next静态生产构建、automation-client构建及其5项测试通过；原生helper构建；Rust库测试317通过、0失败、3忽略。
-- `scripts/check-enhancement.sh --native`：Rust库测试317通过、0失败、3忽略。
+- `scripts/check-enhancement.sh --all`：Node行为回归17通过；Bun前端57通过；TypeScript检查、Next静态生产构建、automation-client构建及其5项测试通过；原生helper构建；Rust库测试318通过、0失败、3忽略。此全量命令早于下述最终测试fixture从PEM改为DER的清理。
+- 最终DER fixture变更后，`scripts/check-enhancement.sh --native`：Rust库测试318通过、0失败、3忽略；定向 `rustfmt --check` 通过。
 - `scripts/check-enhancement.sh --bundle`：release helper与Tauri macOS `.app` 打包成功，产物位于 `target/release/bundle/macos/meetily.app`。本次只验证构建/签名，不代表启动或实际设备录音；未配置Apple notarization凭证，因此跳过公证。
-- Bun 1.3.14与CMake 3.31.6使用任务临时路径，不修改全局安装；Cargo与pnpm锁文件未变。
+- Bun 1.3.14与CMake 3.31.6使用任务临时路径，不修改全局安装。Webhook集成测试新增Rust测试依赖并更新 `Cargo.lock`；没有改动pnpm锁文件。
 
-P3代码与自动化测试已有提交；本轮完整回归通过，但阶段计划要求的实际助手宿主连接、HTTPS本地接收端投递及超时/500/401故障注入尚无验收证据。P4 D1为明确NO-GO；D2仅完成时间映射、精度字段及持久化合同，真实provider时间戳、中文尾句样本和三入口播放核对仍未完成。缺少授权的中文RTTM/转写样本、模型工件和许可证明，故不能把整个P4或Pro效果对齐标为完成。
+P3代码与自动化测试已有提交。新增测试专用loopback HTTPS receiver端到端用例，以真实TLS请求验证固定目标IP、原始JSON正文HMAC、503重试后200成功、重复投递保持同一事件ID/正文、401终止以及服务端延迟导致的超时。该用例使用明确提供的测试根证书，不放宽生产信任配置；这不是面向真实第三方平台的交付验收。真实助手宿主连接、真实macOS webhook Keychain读回和设备录音仍待现场验收。
+
+P4 D1为明确NO-GO，未进入D3–D5；D2完成时间映射、精度字段及持久化合同，但真实provider时间戳、中文尾句模型回归和三入口播放核对仍未完成。公开AISHELL-4/AliMeeting可作研究候选，但pyannote segmentation-3.0模型卡列出两者为训练数据，因此不构成该模型的独立留出集。当前没有本地模型及获准中文RTTM/转写音频样本，也未确认完整模型栈和转换工件的分发许可，不能把P4或Pro中文效果对齐标为完成。

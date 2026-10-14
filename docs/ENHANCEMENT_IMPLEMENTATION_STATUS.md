@@ -82,4 +82,4 @@ P0工程任务已落地；真实两小时设备采集、设备断开/磁盘满/�
 
 Webhook目标要求HTTPS和明确主机/IP许可。配置时验证DNS并固定解析到的地址，拦截私网/保留地址、禁止重定向；显式审批的精确内网IP可用于内部接收端。每个Webhook签名密钥随机生成、写入macOS Keychain并读回验证，数据库只存引用；创建后UI只显示一次。投递使用原始持久化JSON与 `timestamp + "." + raw_body` 的HMAC-SHA256，每次重试事件ID/正文稳定、时间戳/签名刷新。2xx成功，429/5xx/网络错误最多重试5次（10秒、1分钟、5分钟、30分钟、2小时），其他4xx终止；10秒超时，最多读取16KiB响应且不记录正文。关闭应用自动化会停止dispatcher；重启后恢复卡在delivering的delivery。停用单个订阅会暂停其待投递队列，重新启用后可继续。
 
-验证：事件事务回滚、两个订阅各自入队、固定退避、状态码分类、签名原始正文、私网/metadata/link-local拦截、DNS地址变化、显式loopback IP审批和HTTP 302不跟随均有Rust测试；Rust全量 `312 passed / 0 failed / 3 ignored`，前端TypeScript检查与Next生产构建通过。当前未完成对本机HTTPS接收器的端到端签名投递、真实macOS Keychain webhook密钥探针和超时/500接收器故障注入；这些不作为已验证项。A5代码已完成首版实现，外部接收端验收仍待做。
+验证：事件事务回滚、两个订阅各自入队、固定退避、状态码分类、签名原始正文、私网/metadata/link-local拦截、DNS地址变化、显式loopback IP审批和HTTP 302不跟随均有Rust测试。后续新增测试专用loopback HTTPS receiver，校验原始正文HMAC、503后重试成功、重复重试的事件ID/正文稳定、401终止及超时；最终DER证书fixture后Rust全量318通过、0失败、3忽略，定向格式检查通过。该测试使用显式测试根证书，不改变生产信任配置。真实助手宿主连接、真实macOS Keychain webhook密钥探针和真实接收平台验收仍待现场完成，故P3阶段门禁尚未全部通过。
