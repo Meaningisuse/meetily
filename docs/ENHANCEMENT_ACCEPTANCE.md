@@ -33,7 +33,7 @@ cargo run --locked -p meetily --example processing_stress -- /path/to/ggml-tiny.
 | 真实磁盘满 | 已接受输入保留、预算满/坏存储目标注入测试 | 待现场验收 |
 | 强制退出后真实会议恢复 | 重启pending/校验/去重/恢复UI测试 | 待现场验收 |
 | 中文长会议摘要质量 | 中文预算及尾行动项mock HTTP回归 | 待真实会议验收 |
-| 中文说话人效果 | Sortformer v2本机跑完19场/612.149分钟，主DER微平均4.03%、宏平均4.37%；overlap DER 7.89%/7.52%，19/19低于20%；C ABI CPU流式组件完成138.018分钟单流压力测试，峰值RSS 421 MiB | 训练数据中的具体会议与AliMeeting Test重叠未审计，不能认定独立holdout；同一34.442分钟session重复4次不是独立质量或多session证据；整文件Metal CLI峰值RSS 2.82 GiB仍超门槛，完整Meetily链路和Metal流式路径未验证；P4整体保持NO-GO，尚缺训练拆分核验、单人/中英切换和真实会议验收 |
+| 中文说话人效果 | Sortformer v2本机跑完19场/612.149分钟，主DER微平均4.03%、宏平均4.37%；overlap DER 7.89%/7.52%，19/19低于20%；C ABI CPU流式组件完成138.018分钟单流压力测试，峰值RSS 421 MiB | 固定模型卡声明`Alimeeting-train`；但同revision `.nemo`配置的train/validation/test manifest路径均为`null`，公开模板未提供实际session清单。没有发现Eval/Test用于此权重的证据，也未能核实完整训练谱系，因此不能认定为完成session审计的独立holdout或已知泄漏；同一34.442分钟session重复4次不是独立质量或多session证据；整文件Metal CLI峰值RSS 2.82 GiB仍超门槛，完整Meetily链路和Metal流式路径未验证；P4整体保持NO-GO，尚缺独立session排除、单人/中英切换和真实会议验收 |
 | 转写时间戳试听入口 | 已接通 meeting ID 到会议目录内唯一音频文件的安全解析、原生流式播放与时间戳跳播；Rust边界测试3项、前端行为测试2项、类型检查通过 | 已实现录音/导入/重转写共用UI链路，尚未在应用中对同一公开样本实际完成三入口播放和跳播验收 |
 
 P0工程任务完成不意味着上述实际运行/业务验收已完成。P3、P4另按各任务验证并提交，不越过效果门禁宣称Pro对齐全部完成。
