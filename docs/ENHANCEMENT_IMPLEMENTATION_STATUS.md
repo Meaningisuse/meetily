@@ -63,3 +63,9 @@ P0现场验收、P3、P4目前尚未完成。P1模板管理与P2导出均未开�
 新增 `GET /meetings`、`/search`、`/meetings/:id/transcript`、`/meetings/:id/summary`、`/jobs/:id`。会议列表按 `created_at DESC, id ASC` 游标分页；转录按时间/时间戳/id 稳定分页，并在转录版本变化后拒绝旧游标。分页默认50、最大200；搜索要求1–256字符，将 `%`、`_` 与反斜线按字面匹配，片段最多300字符。摘要响应不返回完整转录/笔记，任务响应不暴露内部参数或结果正文。health capabilities增加 `meeting_read`、`jobs`，不声明导出能力。
 
 验证：9项自动化 Rust 测试通过，覆盖251段转录跨页、删除会议后继续分页、版本游标冲突、重复/越界参数、敏感路径隔离及loopback读接口。`rustfmt` 针对改动文件通过；仓库全量 `cargo fmt --check` 报告大量既有文件格式差异，未对无关文件批量格式化。
+
+### P3 / A3：CLI 与 MCP 只读客户端
+
+新增独立 `automation-client` TypeScript 包，采用官方 MCP TypeScript Server SDK `@modelcontextprotocol/server` 2.3.1。CLI/MCP 都通过 app-data discovery 验证活动 loopback 实例，然后使用 macOS Keychain 中按 client ID 查找的凭据；一次性令牌不作为命令行参数。CLI 提供会议列表、搜索、转录分页、摘要与任务状态读取，stdout只输出JSON；MCP stdio注册相同五种只读工具，不提供shell、写入、录音或导出工具。新增 `docs/INTERNAL_AUTOMATION.md` 说明如何手工配置所选助手，不自动改动外部主机配置。
+
+验证：包锁文件安装、TypeScript编译和5项 Bun 测试通过；包括陈旧实例、loopback 地址约束、CLI退出码/凭据隔离，以及MCP stdio仅列出五项只读工具的协议测试。统一前端门禁测试包括该包的锁文件安装、编译和测试。实际连接某个助手的主机级操作尚未验收，需用户选择目标助手；测试未读取会议或既有Keychain项目。

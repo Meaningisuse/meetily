@@ -36,6 +36,6 @@ test('frontend failure stops subsequent checks and returns the failing exit code
 test('frontend checks resolve the repository independently of the caller directory', (t) => {
   const { result, commands, directories } = run(t, ['--frontend']);
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(commands, ['pnpm', 'node', 'bun', 'pnpm', 'pnpm']);
-  assert.deepEqual(directories, Array(5).fill(resolve(__dirname, '..')));
+  assert.deepEqual(commands, ['pnpm', 'node', 'bun', 'pnpm', 'pnpm', 'pnpm', 'pnpm', 'pnpm']);
+  assert.deepEqual(directories, Array(8).fill(resolve(__dirname, '..')));
 });

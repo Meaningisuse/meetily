@@ -20,6 +20,9 @@ frontend_checks() {
   bun test frontend/tests
   pnpm -C frontend exec tsc --noEmit
   pnpm -C frontend build
+  pnpm --dir automation-client install --frozen-lockfile
+  pnpm --dir automation-client build
+  pnpm --dir automation-client test
 }
 
 prepare_helper() {
