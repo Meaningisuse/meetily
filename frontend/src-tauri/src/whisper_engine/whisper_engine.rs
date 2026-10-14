@@ -1339,8 +1339,10 @@ mod tests {
     use tokio::time::{timeout, Duration};
 
     /// Run manually with a multilingual Whisper model and generated Chinese
-    /// speech fixture supplied through environment variables. This exercises
-    /// the production engine path without checking model weights or audio in.
+    /// speech fixture supplied through environment variables. Set
+    /// WHISPER_TIMING_USE_METAL=1 to exercise the Metal backend; that mode must
+    /// run outside environments that hide Metal devices from the process.
+    /// Model weights and audio are not checked into the repository.
     #[tokio::test]
     #[ignore = "requires WHISPER_TIMING_TEST_MODEL and WHISPER_TIMING_TEST_AUDIO"]
     async fn timestamp_decode_preserves_synthetic_chinese_tail() {
@@ -1348,16 +1350,17 @@ mod tests {
             .expect("set WHISPER_TIMING_TEST_MODEL to a multilingual GGML model");
         let audio_path = std::env::var("WHISPER_TIMING_TEST_AUDIO")
             .expect("set WHISPER_TIMING_TEST_AUDIO to a generated Chinese WAV fixture");
+        let use_gpu = std::env::var_os("WHISPER_TIMING_USE_METAL").is_some();
         let engine = WhisperEngine::new_with_models_dir(None).unwrap();
-        let cpu_context = WhisperContext::new_with_params(
+        let context = WhisperContext::new_with_params(
             &model_path,
             WhisperContextParameters {
-                use_gpu: false,
+                use_gpu,
                 ..Default::default()
             },
         )
         .unwrap();
-        *engine.current_context.write().await = Some(cpu_context);
+        *engine.current_context.write().await = Some(context);
         *engine.current_model.write().await = Some("tiny-test-fixture".into());
 
         let audio = crate::audio::decoder::decode_audio_file(std::path::Path::new(&audio_path))
