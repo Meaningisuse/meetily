@@ -620,6 +620,7 @@ pub fn run() {
             is_recording,
             get_transcription_status,
             read_audio_file,
+            audio::playback::get_meeting_audio_path,
             save_transcript,
             analytics::commands::init_analytics,
             analytics::commands::disable_analytics,

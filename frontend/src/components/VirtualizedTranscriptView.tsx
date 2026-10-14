@@ -34,6 +34,8 @@ export interface VirtualizedTranscriptViewProps {
     totalCount?: number;
     loadedCount?: number;
     onLoadMore?: () => void;
+    /** Seek the associated recording to the segment start, when playback is available. */
+    onSeekTo?: (seconds: number) => void;
 }
 
 // Threshold for enabling virtualization (below this, use simple rendering)
@@ -71,6 +73,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     confidence,
     isStreaming,
     showConfidence,
+    onSeekTo,
 }: {
     id: string;
     timestamp: number;
@@ -78,6 +81,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     confidence?: number;
     isStreaming: boolean;
     showConfidence: boolean;
+    onSeekTo?: (seconds: number) => void;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
 
@@ -86,9 +90,13 @@ const TranscriptSegment = memo(function TranscriptSegment({
             <div className="flex items-start gap-2">
                 <Tooltip>
                     <TooltipTrigger>
-                        <span className="text-xs text-gray-400 mt-1 flex-shrink-0 min-w-[50px]">
-                            {formatRecordingTime(timestamp)}
-                        </span>
+                        {onSeekTo ? (
+                            <button type="button" onClick={() => onSeekTo(timestamp)} aria-label={`Play from ${formatRecordingTime(timestamp)}`} className="text-xs text-blue-600 hover:text-blue-800 underline underline-offset-2 mt-1 flex-shrink-0 min-w-[50px] text-left">
+                                {formatRecordingTime(timestamp)}
+                            </button>
+                        ) : (
+                            <span className="text-xs text-gray-400 mt-1 flex-shrink-0 min-w-[50px]">{formatRecordingTime(timestamp)}</span>
+                        )}
                     </TooltipTrigger>
                     <TooltipContent>
                         {confidence !== undefined && showConfidence && (
@@ -124,6 +132,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     totalCount = 0,
     loadedCount = 0,
     onLoadMore,
+    onSeekTo,
 }) => {
     // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -296,6 +305,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         confidence={segment.confidence}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        onSeekTo={onSeekTo}
                                     />
                                 </div>
                             );
@@ -352,6 +362,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         confidence={segment.confidence}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        onSeekTo={onSeekTo}
                                     />
                                 </motion.div>
                             );

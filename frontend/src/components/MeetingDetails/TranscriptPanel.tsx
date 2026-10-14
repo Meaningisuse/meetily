@@ -4,7 +4,8 @@ import { Transcript, TranscriptSegmentData } from '@/types';
 import { TranscriptView } from '@/components/TranscriptView';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -49,6 +50,34 @@ export function TranscriptPanel({
   meetingFolderPath,
   onRefetchTranscripts,
 }: TranscriptPanelProps) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [audioError, setAudioError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAudioUrl(null);
+    setAudioError(null);
+    if (!meetingId) return;
+
+    invoke<string>('get_meeting_audio_path', { meetingId })
+      .then((path) => {
+        if (!cancelled) setAudioUrl(convertFileSrc(path));
+      })
+      .catch((error) => {
+        if (!cancelled) setAudioError(String(error));
+      });
+
+    return () => { cancelled = true; };
+  }, [meetingId]);
+
+  const seekTo = (seconds: number) => {
+    const audio = audioRef.current;
+    if (!audio || !Number.isFinite(seconds) || seconds < 0) return;
+    audio.currentTime = seconds;
+    void audio.play().catch(() => setAudioError('Unable to play this recording'));
+  };
+
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
     if (usePagination && segments) {
@@ -76,6 +105,13 @@ export function TranscriptPanel({
           meetingFolderPath={meetingFolderPath}
           onRefetchTranscripts={onRefetchTranscripts}
         />
+        {audioUrl && (
+          <div className="mt-3 flex flex-col gap-1">
+            <span className="text-xs text-gray-500">Recording playback · click a transcript time to seek</span>
+            <audio ref={audioRef} controls preload="metadata" src={audioUrl} className="w-full" onError={() => setAudioError('Unable to load this recording')} />
+          </div>
+        )}
+        {audioError && <p role="status" className="mt-2 text-xs text-gray-500">Recording playback unavailable</p>}
       </div>
 
       {/* Transcript content - use virtualized view for better performance */}
@@ -94,6 +130,7 @@ export function TranscriptPanel({
           totalCount={totalCount}
           loadedCount={loadedCount}
           onLoadMore={onLoadMore}
+          onSeekTo={audioUrl ? seekTo : undefined}
         />
       </div>
 
