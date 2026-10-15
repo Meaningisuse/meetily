@@ -110,6 +110,17 @@ AppState.jobs持有实例级ResourceScheduler，录音、本地摘要、导入�
 
 超时后录音仍可能开始，客户端应使用原key及相同请求体重试取得session，不能当作未执行而自动换key。文档同步见[原生HTTP开始录音](INTERNAL_AUTOMATION.md#原生-http-开始录音与超时重试)。测试未启动设备、加载模型、访问真实会议或Keychain，也没有打包／启动.app；panic、结果写入失败及应用退出后恢复仍沿用保守边界。本项不宣称所有写API均已取消安全：摘要创建与普通任务取消的内联执行缺口仍需独立修复。
 
+## 2026-10-15 摘要人工保存一致性
+
+现代markdown／BlockNote摘要的清洁编辑器不再回写父级保留的初始`aiSummary`；保存B后再次保存不会用已推进的revision把正文回滚为A。legacy摘要继续保存直接编辑的状态。BlockNote在保存前记录编辑代次，Markdown转换及原生保存期间继续编辑的C不会被B的完成响应清除dirty，下一次保存沿用B成功后的revision。没有通过更新`aiSummary`触发内容重载，避免覆盖新草稿。
+
+- 红测：真实hook与摘要组件组合回归共3项，1通过／2失败、退出1；实际存储B在第二次保存后变回A，保存期间编辑C在完成后dirty错误变为false，legacy保存通过。
+- 最终定向：`bun test tests/hooks/summary-manual-save.test.tsx`退出0，6通过／0失败、42次expect。覆盖重复保存、原生保存／Markdown转换期间编辑、CONFLICT与IO_ERROR失败后草稿及dirty保留、原revision重试、下一次保存C和legacy兼容。
+- 最终前端全量：`bun test tests`退出0，86通过／0失败，18个文件、355次expect。Node24.14.0下`tsc --noEmit`退出0且无诊断，`pnpm build`退出0，完成生产构建及11页静态生成；Bun1.3.14、pnpm10.32.1，未安装或升级依赖。首轮类型检查发现新测试fixture缺少color，补齐后已完整重跑通过，未弱化业务断言。
+- Sol实现代理负责此项源代码与测试，主代理核对保存路径与最终日志，Astra只读复核，Luna执行RED和最终验证。并行API开始录音的完整原生检查另行记录；此项只改前端，不重复原生测试。
+
+测试隔离原生invoke、上下文与BlockNote解析／视图边界，保留真实hook、摘要保存编排和编辑状态处理；没有读写真会议。真实BlockNote DOM、summary_json专用子编辑器交互、切换会议时在途保存、外部刷新覆盖草稿及重复并发保存的串行化不在本项验收范围。没有打包／启动.app或进行真实会议人工编辑验收。
+
 ## P0 / F4 工程验证
 
 - 数据库恢复：异常打开前保留 DB/WAL/SHM；SHA256清单、私有目录、fsync与发布后读回。备份失败不会继续破坏原始文件。正常升级用 SQLite online snapshot，测试包含未checkpoint的已提交WAL和迁移前旧数据。没有自动删除原WAL或声称能修复损坏的数据库。依据：[SQLite VACUUM INTO](https://www.sqlite.org/lang_vacuum.html)。

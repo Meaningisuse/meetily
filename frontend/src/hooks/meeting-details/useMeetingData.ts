@@ -68,8 +68,12 @@ export function useMeetingData({ meeting, summaryData, summaryRevision, onMeetin
       if (blockNoteSummaryRef.current?.isDirty) {
         console.log('💾 Saving BlockNote editor changes...');
         await blockNoteSummaryRef.current.saveSummary();
-      } else if (aiSummary) {
+      } else if (aiSummary && !('markdown' in aiSummary) && !('summary_json' in aiSummary)) {
+        // Legacy summaries are edited directly in aiSummary. Modern editor drafts
+        // live in BlockNote; the original prop is never a safe fallback to save.
         await handleSaveSummary(aiSummary);
+      } else {
+        return;
       }
 
       toast.success("Changes saved successfully");

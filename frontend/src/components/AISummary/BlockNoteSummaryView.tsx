@@ -80,6 +80,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const [currentBlocks, setCurrentBlocks] = useState<Block[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const isContentLoaded = useRef(false);
+  const editGeneration = useRef(0);
 
   // Create BlockNote editor for markdown parsing
   const editor = useCreateBlockNote({
@@ -121,6 +122,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const handleEditorChange = useCallback((blocks: Block[]) => {
     // Only set dirty flag if content has finished loading
     if (isContentLoaded.current) {
+      editGeneration.current += 1;
       setCurrentBlocks(blocks);
       setIsDirty(true);
     }
@@ -136,6 +138,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const handleSave = useCallback(async () => {
     if (!onSave || !isDirty) return;
 
+    const savedGeneration = editGeneration.current;
     setIsSaving(true);
     try {
       console.log('💾 Saving BlockNote content...');
@@ -154,7 +157,9 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       }
 
       await onSave(saveData);
-      setIsDirty(false);
+      // A completed save acknowledges only its own snapshot. Keep edits made
+      // during conversion or the native request dirty for the next save.
+      if (editGeneration.current === savedGeneration) setIsDirty(false);
       console.log('✅ Save successful');
     } catch (error) {
       console.error('❌ Save failed:', error);
