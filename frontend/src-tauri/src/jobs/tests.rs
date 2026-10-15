@@ -155,12 +155,15 @@ async fn source_change_does_not_overwrite_new_summary() {
         .save_summary_markdown("source-race", "New human edit", 1)
         .await
         .unwrap();
-    assert!(!crate::database::repositories::summary::SummaryProcessesRepository::update_process_completed(&pool, "source-race", started, json!({"markdown":"Old generated answer"}), 1, 0.1).await.unwrap());
+    assert!(!crate::database::repositories::summary::SummaryProcessesRepository::update_process_completed(&pool, "source-race", started, json!({"markdown":"Old generated answer","generated_title":"Stale title"}), 1, 0.1).await.unwrap());
     let document = crate::meeting::MeetingDocumentService::new(pool.clone())
         .snapshot("source-race")
         .await
         .unwrap();
     assert_eq!(document.summary_markdown.as_deref(), Some("New human edit"));
+    assert_eq!(document.title, "中文会议");
+    let completed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM automation_events WHERE meeting_id='source-race' AND kind='summary.completed'").fetch_one(&pool).await.unwrap();
+    assert_eq!(completed, 0);
     let job = jobs.get(&job.id).await.unwrap();
     assert_eq!(job.status, "failed");
     assert_eq!(job.error_code.as_deref(), Some("CONFLICT"));
@@ -222,7 +225,7 @@ async fn cancellation_preserves_later_edit_and_blocks_late_completion() {
         .await
         .unwrap();
     jobs.cancel(&job.id).await.unwrap();
-    assert!(!crate::database::repositories::summary::SummaryProcessesRepository::update_process_completed(&pool, "cancel-edit", started, json!({"markdown":"Late answer"}), 1, 0.1).await.unwrap());
+    assert!(!crate::database::repositories::summary::SummaryProcessesRepository::update_process_completed(&pool, "cancel-edit", started, json!({"markdown":"Late answer","generated_title":"Cancelled title"}), 1, 0.1).await.unwrap());
     let result: String =
         sqlx::query_scalar("SELECT result FROM summary_processes WHERE meeting_id='cancel-edit'")
             .fetch_one(&pool)
@@ -230,6 +233,13 @@ async fn cancellation_preserves_later_edit_and_blocks_late_completion() {
             .unwrap();
     assert!(result.contains("Keep this edit"));
     assert_eq!(jobs.get(&job.id).await.unwrap().status, "cancelled");
+    let title: String = sqlx::query_scalar("SELECT title FROM meetings WHERE id='cancel-edit'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(title, "中文会议");
+    let completed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM automation_events WHERE meeting_id='cancel-edit' AND kind='summary.completed'").fetch_one(&pool).await.unwrap();
+    assert_eq!(completed, 0);
 }
 
 #[tokio::test]

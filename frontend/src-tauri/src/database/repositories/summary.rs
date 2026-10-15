@@ -137,7 +137,6 @@ impl SummaryProcessesRepository {
         .bind(started_at)
         .execute(&mut *transaction)
         .await?;
-        let mut completion_revision = None;
         if update.rows_affected() == 1 {
             let versions = crate::database::repositories::content_version::bump(
                 &mut transaction,
@@ -145,7 +144,6 @@ impl SummaryProcessesRepository {
                 crate::database::repositories::content_version::ContentKind::Summary,
             )
             .await?;
-            completion_revision = Some(versions.revision);
             let markdown = crate::meeting::normalize::summary_markdown(&result_str);
             sqlx::query("INSERT INTO meeting_document_content(meeting_id,summary_markdown,summary_source_transcript_revision,summary_source_speaker_revision) VALUES(?,?,?,?) ON CONFLICT(meeting_id) DO UPDATE SET summary_markdown=excluded.summary_markdown,summary_source_transcript_revision=excluded.summary_source_transcript_revision,summary_source_speaker_revision=excluded.summary_source_speaker_revision")
                 .bind(meeting_id).bind(markdown).bind(versions.transcript_revision).bind(versions.speaker_revision).execute(&mut *transaction).await?;
@@ -156,18 +154,6 @@ impl SummaryProcessesRepository {
                     .bind(id).bind(source_revision).bind(&result_str).bind(now).execute(&mut *transaction).await?;
                 sqlx::query("UPDATE enhancement_jobs SET status='succeeded',progress=1,error_code=NULL,updated_at=? WHERE id=? AND status='running'")
                     .bind(now).bind(id).execute(&mut *transaction).await?;
-                if let Some(revision) = completion_revision {
-                    crate::automation::events::append(
-                        &mut transaction,
-                        &crate::automation::events::DomainEvent::new(
-                            meeting_id,
-                            "summary.completed",
-                            revision,
-                            Some(id),
-                        ),
-                    )
-                    .await?;
-                }
             }
             // Generated titles share the completion transaction and source check.
             if let Some(name) = result
@@ -198,6 +184,25 @@ impl SummaryProcessesRepository {
                     )
                     .await?;
                 }
+            }
+            // An event describes the complete business transaction, including
+            // any generated-title bump, rather than the intermediate summary revision.
+            if let Some((id, _, _)) = &job {
+                let final_versions = crate::database::repositories::content_version::read(
+                    &mut transaction,
+                    meeting_id,
+                )
+                .await?;
+                crate::automation::events::append(
+                    &mut transaction,
+                    &crate::automation::events::DomainEvent::new(
+                        meeting_id,
+                        "summary.completed",
+                        final_versions.revision,
+                        Some(id),
+                    ),
+                )
+                .await?;
             }
         }
         transaction.commit().await?;
@@ -348,10 +353,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn summary_completion_event_uses_final_document_revision() {
+        for (case, result, title, revision) in [
+            (
+                "changed-title",
+                json!({"markdown":"Complete summary","generated_title":"新的会议标题"}),
+                "新的会议标题",
+                2,
+            ),
+            (
+                "same-title",
+                json!({"markdown":"Complete summary","generated_title":" 中文会议 "}),
+                "中文会议",
+                1,
+            ),
+            (
+                "no-title",
+                json!({"markdown":"Complete summary"}),
+                "中文会议",
+                1,
+            ),
+            (
+                "empty-title",
+                json!({"markdown":"Complete summary","generated_title":"  "}),
+                "中文会议",
+                1,
+            ),
+            (
+                "long-title",
+                json!({"markdown":"Complete summary","generated_title":"中".repeat(257)}),
+                "中文会议",
+                1,
+            ),
+            (
+                "invalid-title-type",
+                json!({"markdown":"Complete summary","generated_title":42}),
+                "中文会议",
+                1,
+            ),
+        ] {
+            let pool = test_pool().await;
+            let started = Utc::now();
+            seed_running_summary_job(&pool, case, started, "completion-job").await;
+            sqlx::query("INSERT INTO automation_webhooks(id,url,secret_ref,allowed_hosts_json,kinds_json,enabled,created_at) VALUES('completion-hook','https://example.test/hook','test-only','[]','[\"summary.completed\"]',1,?)")
+                .bind(started.timestamp()).execute(&pool).await.unwrap();
+            assert!(SummaryProcessesRepository::update_process_completed(
+                &pool,
+                case,
+                started,
+                result.clone(),
+                1,
+                1.0
+            )
+            .await
+            .unwrap());
+            let document = crate::meeting::MeetingDocumentService::new(pool.clone())
+                .snapshot(case)
+                .await
+                .unwrap();
+            assert_eq!(document.title, title, "{case}");
+            assert_eq!(
+                document.summary_markdown.as_deref(),
+                Some("Complete summary")
+            );
+            assert_eq!(document.versions.revision, revision, "{case}");
+            assert_eq!(document.versions.summary_revision, 1);
+            let (kind, job, event_revision, payload): (String, String, i64, String) = sqlx::query_as("SELECT kind,job_id,revision,payload_json FROM automation_events WHERE meeting_id=?")
+                .bind(case).fetch_one(&pool).await.unwrap();
+            let payload: crate::automation::events::DomainEvent =
+                serde_json::from_str(&payload).unwrap();
+            assert_eq!(kind, "summary.completed");
+            assert_eq!(job, "completion-job");
+            assert_eq!(
+                event_revision, document.versions.revision,
+                "{case}: event must describe the completed transaction"
+            );
+            assert_eq!(
+                payload.revision, revision,
+                "{case}: serialized webhook revision"
+            );
+            assert_eq!(payload.meeting_id, case);
+            assert_eq!(payload.job_id.as_deref(), Some("completion-job"));
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM enhancement_jobs WHERE id='completion-job'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(status, "succeeded");
+            // Replaying the same completion must not bump versions or duplicate outbox entries.
+            assert!(!SummaryProcessesRepository::update_process_completed(
+                &pool, case, started, result, 1, 1.0
+            )
+            .await
+            .unwrap());
+            let counts: (i64,i64,i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM automation_events),(SELECT COUNT(*) FROM automation_deliveries),(SELECT COUNT(*) FROM enhancement_job_results)")
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(counts, (1, 1, 1));
+            // A consumer can use the event revision for the next conditional edit.
+            let after_edit = crate::meeting::MeetingWriteService::new(pool.clone())
+                .save_notes_markdown(case, "Consumer note", payload.revision)
+                .await
+                .unwrap();
+            assert_eq!(after_edit.revision, revision + 1);
+            let event_after_edit: i64 =
+                sqlx::query_scalar("SELECT revision FROM automation_events")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                event_after_edit, revision,
+                "delayed events retain their committed revision"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn summary_result_and_event_commit_or_rollback_together() {
         let pool = test_pool().await;
         let started = Utc::now();
         seed_running_summary_job(&pool, "event-completion", started, "event-job").await;
+        sqlx::query("INSERT INTO automation_webhooks(id,url,secret_ref,allowed_hosts_json,kinds_json,enabled,created_at) VALUES('a-valid-filter','https://example.test/valid','valid-secret','[]','[\"summary.completed\"]',1,?)")
+            .bind(started.timestamp()).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO automation_webhooks(id,url,secret_ref,allowed_hosts_json,kinds_json,enabled,created_at) VALUES('broken-filter','https://example.test/hook','secret','[]','{',1,?)")
             .bind(started.timestamp()).execute(&pool).await.unwrap();
 
@@ -359,7 +481,7 @@ mod tests {
             &pool,
             "event-completion",
             started,
-            json!({"markdown":"complete"}),
+            json!({"markdown":"complete","generated_title":"Completed title"}),
             1,
             1.0,
         )
@@ -385,6 +507,23 @@ mod tests {
         assert_eq!(status, "PENDING");
         assert_eq!(job_status, "running");
         assert_eq!(events, 0);
+        let versions: (i64,i64) = sqlx::query_as("SELECT revision,summary_revision FROM meeting_content_versions WHERE meeting_id='event-completion'").fetch_one(&pool).await.unwrap();
+        assert_eq!(versions, (0, 0));
+        let title: String =
+            sqlx::query_scalar("SELECT title FROM meetings WHERE id='event-completion'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(title, "中文会议");
+        let rolled_back: (i64,i64,i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM enhancement_job_results),(SELECT COUNT(*) FROM meeting_document_content),(SELECT COUNT(*) FROM automation_deliveries)").fetch_one(&pool).await.unwrap();
+        assert_eq!(rolled_back, (0, 0, 0));
+        let result: Option<String> = sqlx::query_scalar(
+            "SELECT result FROM summary_processes WHERE meeting_id='event-completion'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(result, None);
 
         sqlx::query("DELETE FROM automation_webhooks WHERE id='broken-filter'")
             .execute(&pool)
@@ -399,7 +538,7 @@ mod tests {
             &pool,
             "event-completion",
             started,
-            json!({"markdown":"complete"}),
+            json!({"markdown":"complete","generated_title":"Completed title"}),
             1,
             1.0,
         )
@@ -412,6 +551,27 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(event, ("summary.completed".into(), "event-job".into()));
+        let document = crate::meeting::MeetingDocumentService::new(pool.clone())
+            .snapshot("event-completion")
+            .await
+            .unwrap();
+        assert_eq!(document.title, "Completed title");
+        assert_eq!(document.summary_markdown.as_deref(), Some("complete"));
+        assert_eq!(document.versions.revision, 2);
+        let (revision,payload): (i64,String) = sqlx::query_as("SELECT revision,payload_json FROM automation_events WHERE meeting_id='event-completion'").fetch_one(&pool).await.unwrap();
+        assert_eq!(revision, 2);
+        assert_eq!(
+            serde_json::from_str::<crate::automation::events::DomainEvent>(&payload)
+                .unwrap()
+                .revision,
+            2
+        );
+        let delivery: (i64, String) =
+            sqlx::query_as("SELECT COUNT(*),MIN(status) FROM automation_deliveries")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(delivery, (1, "pending".into()));
     }
 
     #[tokio::test]

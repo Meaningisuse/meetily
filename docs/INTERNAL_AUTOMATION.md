@@ -80,7 +80,7 @@ scripts/meetily-chatgpt-tunnel.sh
 
 创建订阅时会生成随机签名密钥，写入 macOS Keychain，界面仅显示一次。接收端应把密钥放在自己的秘密存储中。请求正文是UTF-8 JSON，包含 `event_id`、`meeting_id`、`kind`、`revision`、`job_id` 和 `occurred_at`，不包含转录/摘要正文。请求头为 `X-Meetily-Event`、`X-Meetily-Timestamp` 和 `X-Meetily-Signature: sha256=<hex>`。签名输入为ASCII十进制时间戳、一个句点、随后是未经JSON重序列化的原始请求字节；使用HMAC-SHA256并以常量时间比较。接收端还应限制时间戳年龄，并将 `event_id` 作为唯一键落库，以处理重复投递。
 
-目前支持 `recording.stopped`、`transcript.completed`、`summary.completed` 与 `summary.failed`。摘要/转写事务提交后写入事件和各订阅投递行；故障后队列继续重试。2xx确认成功，429/5xx/网络问题最多再试5次，其他4xx终止；停用订阅会暂停待投递，重新启用可继续。`recording.stopped` 只说明录音文件已保存，不代表转写已完成。
+目前支持 `recording.stopped`、`transcript.completed`、`summary.completed` 与 `summary.failed`。业务写入、事件和各订阅投递行在同一事务中提交，提交后由队列投递；故障后继续重试。`summary.completed.revision` 是摘要及生成标题全部写入后的提交版本，与事件JSON正文中的revision一致。后续人工编辑可能使当前版本更高，接收端仍须处理条件写入冲突，不能把历史事件版本视为永久最新。2xx确认成功，429/5xx/网络问题最多再试5次，其他4xx终止；停用订阅会暂停待投递，重新启用可继续。`recording.stopped` 只说明录音文件已保存，不代表转写已完成。
 
 ## 验证
 

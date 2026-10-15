@@ -73,6 +73,18 @@ AppState.jobs持有实例级ResourceScheduler，录音、本地摘要、导入�
 
 没有启动Tauri应用、读取真实会议或实际播放录音。SSR标记与React交互测试不代替浏览器键盘／读屏工具、真实音频跳播偏差、长列表实际滚动或三入口现场试听验收；D2时间精度和P4效果门禁保持原边界。
 
+## 2026-10-15 摘要完成事件的最终版本一致性
+
+`summary.completed`现在在摘要正文、任务结果／成功状态及生成标题全部写入后，通过同一事务读取最终全局revision，再追加事件和投递行。保留摘要与标题原有的独立版本递增语义；标题变化时最终版本为N+2，不变化时为N+1。事件表的revision与持久化JSON都描述该次完成事务，避免消费者在没有其他编辑时使用事件版本就发生条件写入冲突。
+
+- 红测：真实SQLite测试新增标题变化场景，事件实际revision1、最终文档2，断言失败；Cargo退出101、0通过／1失败。
+- 表驱动覆盖标题变化、相同、缺失、空白、超长、非字符串6种输入，检查最终文档／事件列／JSON、summary_revision只递增一次、job成功。重复完成不新增event／result／delivery，事件版本可用于下一次条件写入；后续人工编辑不重写旧事件版本。
+- 强化来源冲突和取消的既有回归：晚到生成标题不覆盖当前标题，也不发出completed。强化append失败回滚：有效订阅先生成delivery，之后损坏filter触发错误，摘要、标题、版本、canonical、任务结果／状态、event和delivery全部回滚；修复filter后重试成功。
+- 定向Rust：摘要仓库4通过／0失败，jobs13通过／0失败。完整`scripts/check-enhancement.sh --native`退出0，共389项，383通过、0失败、6忽略。使用既有CMake及进程级Xcode覆盖，无依赖安装；模型／设备相关忽略项保持忽略。
+- Astra完成只读事务方案及代码复核，主代理实现，Luna执行红测和GREEN；没有修改schema、事件协议、签名和投递重试，也不修写历史已保存的事件。并行更新通道的文件归属独立，按另一项单独提交。
+
+验证使用测试数据库和本地outbox行，没有访问真实会议、Keychain或Webhook接收器。事件版本只保证对应其完成事务；若投递前已有后续编辑，接收端仍必须正常处理版本冲突。未对生产历史事件做迁移，也未声称完成真实助手／Webhook业务验收。协议说明同步见[内部自动化](INTERNAL_AUTOMATION.md#webhook-接收)。
+
 ## P0 / F4 工程验证
 
 - 数据库恢复：异常打开前保留 DB/WAL/SHM；SHA256清单、私有目录、fsync与发布后读回。备份失败不会继续破坏原始文件。正常升级用 SQLite online snapshot，测试包含未checkpoint的已提交WAL和迁移前旧数据。没有自动删除原WAL或声称能修复损坏的数据库。依据：[SQLite VACUUM INTO](https://www.sqlite.org/lang_vacuum.html)。
