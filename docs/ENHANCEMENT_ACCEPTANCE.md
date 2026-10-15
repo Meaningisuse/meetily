@@ -41,6 +41,19 @@ AppState.jobs持有实例级ResourceScheduler，录音、本地摘要、导入�
 
 验证使用独立调度器实例、测试数据库、合成HTTP及子进程，没有启动真实录音、加载真实模型、操作用户会议或真实Keychain。没有执行新.app打包／启动验收、真实设备rollback故障、长会议资源峰值或外部服务取消协议验收。调度约束本应用发起的任务，不保证整机资源独占；内置helper每次生成后退出可能增加分块摘要的模型重载时间。
 
+## 2026-10-15 Whisper日常单次解码
+
+`transcribe_audio_with_verified_timing`保留现有调用接口，日常路径只执行一次原有的无时间戳canonical解码，直接消费输入PCM，不再复制样本或隐式运行第二次完整推理。文本、confidence、is_partial及解码错误沿用canonical结果。provider层返回空候选时间与Unavailable；录音、catch-up、导入和重转写仍由原有调用方保留整段chunk/VAD的approximate区间，不生成未经验证的细粒度时间。
+
+原双解码逻辑移至显式Rust诊断入口`transcribe_audio_with_timing_diagnostics`，没有新增用户设置或默认环境开关。既有两个忽略的模型诊断测试改为调用此入口；文本匹配且区间合法仍不能宣称Exact，候选子段继续受原精度门禁抑制。日常四个调用点的接入由源码核对，未在本轮逐一启动真实应用流程。
+
+- 红测：先等价提取旧双解码编排，在相同生产helper上注入native解码边界。2项回归均按预期失败（退出101、0通过/2失败）：实际调用false与true两次，且canonical收到的PCM地址与原缓冲不同。
+- 定向检查：`cargo test --locked -p meetily --lib whisper_engine::whisper_engine::tests::`退出0，18通过、0失败、2忽略。新增5项非模型回归覆盖一次解码、PCM移动、中文尾句和canonical返回字段、错误传播、未加载模型错误，以及诊断匹配／文本不一致／候选失败时的精度门禁。
+- 完整原生检查：`scripts/check-enhancement.sh --native`退出0，共388项，382通过、0失败、6忽略。使用仓库CMake3.31.6与进程级Xcode覆盖；helper构建和FFmpeg缓存校验成功。helper1条、build script1条、lib test11条warning未影响退出码。
+- 主代理完成根因核对、实现和测试设计，Luna实际执行红测、定向和全量原生验证。没有修改前端或IPC参数，因此本项没有重复前端检查。
+
+测试替换了耗时的native推理边界以验证实际生产编排，没有加载真实模型、录制音频或使用用户会议。确认的是日常解码调用由两次变为一次，以及移除该层PCM复制；没有测量端到端耗时、GPU负载或峰值RSS，不能宣称总耗时减半。没有重新打包／启动.app。D2独立时间精度和三入口试听仍待验收，P4门禁不变；未知／近似时间的前端显示属于后续独立修复项。
+
 ## P0 / F4 工程验证
 
 - 数据库恢复：异常打开前保留 DB/WAL/SHM；SHA256清单、私有目录、fsync与发布后读回。备份失败不会继续破坏原始文件。正常升级用 SQLite online snapshot，测试包含未checkpoint的已提交WAL和迁移前旧数据。没有自动删除原WAL或声称能修复损坏的数据库。依据：[SQLite VACUUM INTO](https://www.sqlite.org/lang_vacuum.html)。

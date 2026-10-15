@@ -94,6 +94,9 @@ D1 数据准备已验证，但模型门禁未通过。`prepare_alimeeting_test.p
 
 D2的时间映射、精度持久化及Whisper双解码文本保护已提交；末尾标点差异不再误判为文本缺失，英文单词边界仍需一致。录音、catch-up、导入、重转写路径都传递精确分段或保守降级。公开标注对照证明“文本一致+范围合法”仍不足以称时间精确：3/10结构合法结果边界超出±250ms，因此未独立对齐验证前不再导出Whisper候选子段，保留VAD/chunk approximate范围。
 
+2026-10-15日常解码修正：上述双解码文本保护现仅在显式Rust诊断入口`transcribe_audio_with_timing_diagnostics`执行，既有模型诊断测试保留。生产`transcribe_audio_with_verified_timing`只消费PCM做一次canonical解码，provider不提供未验证子段；各调用方继续保留已有chunk/VAD approximate范围。新增5项回归，完整原生检查382通过、0失败、6忽略；没有重跑真实模型或量化耗时／RSS改善。详见[本项验收](ENHANCEMENT_ACCEPTANCE.md#2026-10-15-whisper日常单次解码)。
+
+
 2026-10-14 补充：会议详情页已接入原生流式 `<audio>` 播放控件，录音时间戳可点击跳播；录音、导入、重转写记录共用同一路径。新增本机命令通过 meeting ID 从会议目录定位音频，只将经过 canonicalize 且确认仍位于该目录内的单个音频文件加入 Tauri asset scope，避免把任意前端路径或整个录音目录授权给 WebView。资源查找/越界符号链接测试3项通过；新增前端组件行为测试2项，验证点击时间戳会传入正确片段起点、没有播放器时保持只读；全前端59项及 TypeScript 检查通过。尚未在应用内对同一个样本实际完成三入口试听，不能把代码接线视作试听验收通过。
 
 追加验证：Rust全量326通过、0失败、4忽略；手工启用的模型测试以本机生成中文TTS和多语言tiny模型在CPU及Apple M5 Metal路径运行通过，两次解码保留同一尾句，只差末尾句号。JFK Metal烟测也通过。另以AliMeeting公开音频在CPU上运行首个120秒片段和8个30秒高语音占比片段，tiny模型9/9双解码测试完成，但canonical与带时间戳解码文本均不一致，安全返回`Unavailable`；同一30秒片段改用base模型也返回`Unavailable`。没有得到可评分的精确时间；符合回退合同，不算真实定位通过。模型把“会议纪要”误识，故不能据此声称识别质量；模型时间没有独立标注对照。之前标准Metal加载测试在受限沙箱内因`MTLCreateSystemDefaultDevice()`返回nil而SIGSEGV；沙箱外可见Apple M5并已完成Metal模型加载和推理。精确时间对照、双次解码真实性能和三入口试听仍待验收，D2及P4阶段均未完成。

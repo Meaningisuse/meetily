@@ -85,6 +85,67 @@ pub struct WhisperEngine {
     download_state_test_hook: std::sync::Mutex<Option<Arc<DownloadStateTestHook>>>,
 }
 
+type WhisperDecode = (String, f32, bool, Vec<WhisperSegmentTicks>);
+type WhisperTranscript = (String, f32, bool, Vec<TimedText>, TimingPrecision);
+
+// The routine path consumes PCM once. Chunk/VAD bounds belong to the caller;
+// the provider has no independently validated fine-grained timestamps to add.
+async fn transcribe_with_verified_timing_using<F, Fut>(
+    audio_data: Vec<f32>,
+    language: Option<String>,
+    mut decode: F,
+) -> Result<WhisperTranscript>
+where
+    F: FnMut(Vec<f32>, Option<String>, bool) -> Fut,
+    Fut: std::future::Future<Output = Result<WhisperDecode>>,
+{
+    let (text, confidence, is_partial, _) = decode(audio_data, language, false).await?;
+    Ok((
+        text,
+        confidence,
+        is_partial,
+        Vec::new(),
+        TimingPrecision::Unavailable,
+    ))
+}
+
+async fn transcribe_with_timing_diagnostics_using<F, Fut>(
+    audio_data: Vec<f32>,
+    language: Option<String>,
+    mut decode: F,
+) -> Result<WhisperTranscript>
+where
+    F: FnMut(Vec<f32>, Option<String>, bool) -> Fut,
+    Fut: std::future::Future<Output = Result<WhisperDecode>>,
+{
+    let (canonical_text, confidence, is_partial, _) =
+        decode(audio_data.clone(), language.clone(), false).await?;
+    let audio_duration_ms = (audio_data.len() as i64).saturating_mul(1000) / 16_000;
+    let timestamp_result =
+        decode(audio_data, language, true)
+            .await
+            .map(|(_, _, _, timestamp_segments)| {
+                verify_whisper_timed_segments(
+                    &canonical_text,
+                    &timestamp_segments,
+                    audio_duration_ms,
+                )
+            });
+    if let Err(error) = &timestamp_result {
+        log::warn!(
+            "Whisper timestamp pass failed; retaining canonical text without exact timing: {error}"
+        );
+    }
+    let (timed_segments, timing_precision) = timing_or_unavailable(timestamp_result);
+    Ok((
+        canonical_text,
+        confidence,
+        is_partial,
+        timed_segments,
+        timing_precision,
+    ))
+}
+
 impl WhisperEngine {
     /// Detect available GPU acceleration capabilities
     fn detect_gpu_acceleration() -> bool {
@@ -559,40 +620,42 @@ impl WhisperEngine {
         Ok((text, confidence, is_partial))
     }
 
-    /// Return provider segment times only when a timestamp-enabled decode agrees
-    /// with the established no-timestamp transcript. The canonical transcript
-    /// always comes from the established path, so a timing regression cannot
-    /// silently drop text.
+    /// Decode canonical text once without a timestamp pass or a PCM clone.
+    /// Provider-level timing is unavailable until independent alignment passes
+    /// validation; callers retain their existing approximate chunk/VAD bounds.
+    /// The method name is retained for existing recording and batch callers.
     pub async fn transcribe_audio_with_verified_timing(
         &self,
         audio_data: Vec<f32>,
         language: Option<String>,
     ) -> Result<(String, f32, bool, Vec<TimedText>, TimingPrecision)> {
-        let (canonical_text, confidence, is_partial, _) = self
-            .transcribe_audio_with_mode(audio_data.clone(), language.clone(), false)
-            .await?;
-        let audio_duration_ms = (audio_data.len() as i64).saturating_mul(1000) / 16_000;
-        let timestamp_result = self
-            .transcribe_audio_with_mode(audio_data.clone(), language, true)
-            .await
-            .map(|(_, _, _, timestamp_segments)| {
-                verify_whisper_timed_segments(
-                    &canonical_text,
-                    &timestamp_segments,
-                    audio_duration_ms,
-                )
-            });
-        if let Err(error) = &timestamp_result {
-            log::warn!("Whisper timestamp pass failed; retaining canonical text without exact timing: {error}");
-        }
-        let (timed_segments, timing_precision) = timing_or_unavailable(timestamp_result);
-        Ok((
-            canonical_text,
-            confidence,
-            is_partial,
-            timed_segments,
-            timing_precision,
-        ))
+        transcribe_with_verified_timing_using(
+            audio_data,
+            language,
+            |audio, language, timestamps| {
+                self.transcribe_audio_with_mode(audio, language, timestamps)
+            },
+        )
+        .await
+    }
+
+    /// Explicit diagnostic entry point for comparing timestamp candidates with
+    /// canonical text. This runs two decodes and is never selected implicitly.
+    /// Matching text does not establish timing accuracy: the existing gate
+    /// continues to suppress unvalidated candidate segments.
+    pub async fn transcribe_audio_with_timing_diagnostics(
+        &self,
+        audio_data: Vec<f32>,
+        language: Option<String>,
+    ) -> Result<(String, f32, bool, Vec<TimedText>, TimingPrecision)> {
+        transcribe_with_timing_diagnostics_using(
+            audio_data,
+            language,
+            |audio, language, timestamps| {
+                self.transcribe_audio_with_mode(audio, language, timestamps)
+            },
+        )
+        .await
     }
 
     async fn transcribe_audio_with_mode(
@@ -627,8 +690,8 @@ impl WhisperEngine {
         params.set_language(language_code);
         params.set_translate(should_translate);
 
-        // Keep the established text-only decoder unchanged. Timestamp mode is
-        // used only for a second pass and its text must match before times escape.
+        // Production uses the established text-only decoder. Timestamp mode
+        // is reserved for explicit diagnostics; candidate times stay gated.
         params.set_no_timestamps(!enable_timestamps);
         params.set_token_timestamps(false);
 
@@ -1338,6 +1401,138 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::time::{timeout, Duration};
 
+    // Native inference is the only fake: these tests exercise the same
+    // orchestration used by every production Whisper timing entry point.
+    #[tokio::test]
+    async fn routine_timing_decodes_once_and_preserves_canonical_tail() {
+        let mut calls = Vec::new();
+        let audio = vec![0.25; 160];
+        let (text, confidence, partial, timed, precision) = transcribe_with_verified_timing_using(
+            audio,
+            Some("zh".into()),
+            |samples, language, timestamps| {
+                calls.push((samples.len(), language, timestamps));
+                std::future::ready(Ok(("会议结论，最后行动项。".into(), 0.8, true, Vec::new())))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls, vec![(160, Some("zh".into()), false)]);
+        assert_eq!(text, "会议结论，最后行动项。");
+        assert_eq!(confidence, 0.8);
+        assert!(partial);
+        assert!(timed.is_empty());
+        assert_eq!(precision, TimingPrecision::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn routine_timing_moves_pcm_into_canonical_decode_without_a_copy() {
+        let audio = vec![0.5; 160];
+        let original = audio.as_ptr();
+        let mut canonical_input = None;
+        transcribe_with_verified_timing_using(audio, None, |samples, _, timestamps| {
+            if !timestamps {
+                canonical_input = Some(samples.as_ptr());
+            }
+            std::future::ready(Ok(("Canonical".into(), 0.7, false, Vec::new())))
+        })
+        .await
+        .unwrap();
+        assert_eq!(canonical_input, Some(original));
+    }
+
+    #[tokio::test]
+    async fn routine_timing_propagates_canonical_failure_without_another_decode() {
+        let mut calls = Vec::new();
+        let error = transcribe_with_verified_timing_using(
+            vec![0.5; 160],
+            None,
+            |_, language, timestamps| {
+                calls.push((language, timestamps));
+                std::future::ready(Err(anyhow!("canonical decode failed")))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "canonical decode failed");
+        assert_eq!(calls, vec![(None, false)]);
+    }
+
+    #[tokio::test]
+    async fn timing_diagnostics_keeps_canonical_text_and_enforces_the_accuracy_gate() {
+        for (candidate, expected_precision) in [
+            (
+                Ok(vec![WhisperSegmentTicks {
+                    text: "会议结论，最后行动项。".into(),
+                    start: 10,
+                    end: 90,
+                }]),
+                TimingPrecision::Approximate,
+            ),
+            (
+                Ok(vec![WhisperSegmentTicks {
+                    text: "会议结论".into(),
+                    start: 10,
+                    end: 90,
+                }]),
+                TimingPrecision::Unavailable,
+            ),
+            (
+                Err(anyhow!("timestamp decode failed")),
+                TimingPrecision::Unavailable,
+            ),
+        ] {
+            let mut passes = vec![
+                Ok(("会议结论，最后行动项。".into(), 0.8, false, Vec::new())),
+                candidate.map(|segments| {
+                    (
+                        "diagnostic text must not replace canonical".into(),
+                        0.1,
+                        true,
+                        segments,
+                    )
+                }),
+            ]
+            .into_iter();
+            let mut calls = Vec::new();
+            let (text, confidence, partial, timed, precision) =
+                transcribe_with_timing_diagnostics_using(
+                    vec![0.25; 16_000],
+                    Some("zh".into()),
+                    |samples, language, timestamps| {
+                        calls.push((samples.len(), language, timestamps));
+                        std::future::ready(passes.next().expect("unexpected extra decode"))
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                calls,
+                vec![
+                    (16_000, Some("zh".into()), false),
+                    (16_000, Some("zh".into()), true)
+                ]
+            );
+            assert_eq!(text, "会议结论，最后行动项。");
+            assert_eq!(confidence, 0.8);
+            assert!(!partial);
+            assert!(timed.is_empty());
+            assert_eq!(precision, expected_precision);
+        }
+    }
+
+    #[tokio::test]
+    async fn routine_timing_entry_point_preserves_model_not_loaded_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine =
+            WhisperEngine::new_with_models_dir(Some(directory.path().to_path_buf())).unwrap();
+        let error = engine
+            .transcribe_audio_with_verified_timing(vec![0.25; 160], None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("No model loaded"));
+    }
+
     /// Run manually with a multilingual Whisper model and generated Chinese
     /// speech fixture supplied through environment variables. Set
     /// WHISPER_TIMING_USE_METAL=1 to exercise the Metal backend; that mode must
@@ -1375,7 +1570,7 @@ mod tests {
             .await
             .unwrap();
         let (text, _, _, timed_segments, precision) = engine
-            .transcribe_audio_with_verified_timing(audio.clone(), Some("zh".into()))
+            .transcribe_audio_with_timing_diagnostics(audio.clone(), Some("zh".into()))
             .await
             .unwrap();
         eprintln!(
@@ -1429,9 +1624,10 @@ mod tests {
 
         let audio = crate::audio::decoder::decode_audio_file(std::path::Path::new(&audio_path))
             .unwrap()
-            .into_whisper_format().expect("convert timing fixture");
+            .into_whisper_format()
+            .expect("convert timing fixture");
         let (_, _, _, timed_segments, precision) = engine
-            .transcribe_audio_with_verified_timing(audio, Some("zh".into()))
+            .transcribe_audio_with_timing_diagnostics(audio, Some("zh".into()))
             .await
             .unwrap();
         assert_ne!(precision, TimingPrecision::Exact);
