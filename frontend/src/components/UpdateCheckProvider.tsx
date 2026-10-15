@@ -4,7 +4,6 @@ import React, { createContext, useContext, useState, useCallback, useEffect } fr
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import { UpdateInfo } from '@/services/updateService';
 import { UpdateDialog } from './UpdateDialog';
-import { setUpdateDialogCallback, showUpdateNotification } from './UpdateNotification';
 
 interface UpdateCheckContextType {
   updateInfo: UpdateInfo | null;
@@ -23,26 +22,13 @@ export function UpdateCheckProvider({ children }: { children: React.ReactNode })
   }, []);
 
   const { updateInfo, isChecking, checkForUpdates } = useUpdateCheck({
-    checkOnMount: true,
-    showNotification: true,
-    onUpdateAvailable: (info) => {
-      // Show notification, dialog will be shown when user clicks notification
-      showUpdateNotification(info, handleShowDialog);
-    },
+    checkOnMount: false,
   });
-
-  useEffect(() => {
-    // Register the callback so UpdateNotification can trigger the dialog
-    setUpdateDialogCallback(handleShowDialog);
-    return () => {
-      setUpdateDialogCallback(() => {});
-    };
-  }, [handleShowDialog]);
 
   // Listen for tray menu events
   useEffect(() => {
     const handleTrayCheck = () => {
-      checkForUpdates(true); // Force check from tray
+      void checkForUpdates(true); // Read the installed version for manual-update guidance
       setShowDialog(true);
     };
 

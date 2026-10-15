@@ -6,19 +6,21 @@ import AnalyticsConsentSwitch from "./AnalyticsConsentSwitch";
 import { UpdateDialog } from "./UpdateDialog";
 import { updateService, UpdateInfo } from '@/services/updateService';
 import { Button } from './ui/button';
-import { Loader2, CheckCircle2 } from 'lucide-react';
+import { Loader2, Info } from 'lucide-react';
+import { INTERNAL_UPDATE_POLICY } from '@/lib/update-policy';
 import { toast } from 'sonner';
 
 
 export function About() {
-    const [currentVersion, setCurrentVersion] = useState<string>('0.4.1');
+    const [currentVersion, setCurrentVersion] = useState<string | null>(null);
+    const [isVersionLoading, setIsVersionLoading] = useState(true);
     const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
     const [isChecking, setIsChecking] = useState(false);
     const [showUpdateDialog, setShowUpdateDialog] = useState(false);
 
     useEffect(() => {
         // Get current version on mount
-        getVersion().then(setCurrentVersion).catch(console.error);
+        getVersion().then(setCurrentVersion).catch(console.error).finally(() => setIsVersionLoading(false));
     }, []);
 
     const handleContactClick = async () => {
@@ -30,18 +32,15 @@ export function About() {
     };
 
     const handleCheckForUpdates = async () => {
+        setShowUpdateDialog(true);
         setIsChecking(true);
         try {
             const info = await updateService.checkForUpdates(true);
             setUpdateInfo(info);
-            if (info.available) {
-                setShowUpdateDialog(true);
-            } else {
-                toast.success('You are running the latest version');
-            }
+            setCurrentVersion(info.currentVersion);
         } catch (error: any) {
-            console.error('Failed to check for updates:', error);
-            toast.error('Failed to check for updates: ' + (error.message || 'Unknown error'));
+            console.error('Failed to read installed app version:', error);
+            toast.error('Failed to read installed app version: ' + (error.message || 'Unknown error'));
         } finally {
             setIsChecking(false);
         }
@@ -61,7 +60,7 @@ export function About() {
                     />
                 </div>
                 {/* <h1 className="text-xl font-bold text-gray-900">Meetily</h1> */}
-                <span className="text-sm text-gray-500"> v{currentVersion}</span>
+                <span className="text-sm text-gray-500">{currentVersion ? `v${currentVersion}` : isVersionLoading ? '版本读取中' : '版本未知'}</span>
                 <p className="text-medium text-gray-600 mt-1">
                     Real-time notes and summaries that never leave your machine.
                 </p>
@@ -76,20 +75,16 @@ export function About() {
                         {isChecking ? (
                             <>
                                 <Loader2 className="h-3 w-3 mr-2 animate-spin" />
-                                Checking...
+                                读取中...
                             </>
                         ) : (
                             <>
-                                <CheckCircle2 className="h-3 w-3 mr-2" />
-                                Check for Updates
+                                <Info className="h-3 w-3 mr-2" />
+                                更新说明
                             </>
                         )}
                     </Button>
-                    {updateInfo?.available && (
-                        <div className="mt-2 text-xs text-blue-600">
-                            Update available: v{updateInfo.version}
-                        </div>
-                    )}
+                    <p className="mt-2 text-xs text-gray-500">{INTERNAL_UPDATE_POLICY.message}</p>
                 </div>
             </div>
 
