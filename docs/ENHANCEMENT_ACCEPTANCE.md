@@ -132,6 +132,17 @@ AppState.jobs持有实例级ResourceScheduler，录音、本地摘要、导入�
 
 本项回归直接取消生产共用helper的等待者，未为这两路重复运行真实20秒HTTP中间件；录音start／stop的loopback期限用例在最终全量中通过。摘要attach／spawn是测试动作重建的真实JobService流程，worker使用受控失败动作，不能据此宣称完整`api_process_transcript`或真实provider集成验收。生产owned闭包含完整原command的关系经静态复核及Rust编译确认。没有访问用户会议、Keychain、设备或真实模型，没有打包／启动.app。进程退出、panic和响应保存失败仍不承诺自动完成或自动重发；超时重试规则见[HTTP摘要任务与取消](INTERNAL_AUTOMATION.md#原生-http-摘要任务与取消的超时重试)。
 
+## 2026-10-15 Whisper 短句完成状态修复
+
+用户切换到支持中文的Whisper后，实时短句触发`Transcription needs attention / Partial transcript retained for retry`。根因是native完整解码返回后，旧代码仍将所有不足15秒的输入标成partial；worker因而不确认catchup结果，显式恢复同一短句也会再次被partial门禁拒绝。现删除按时长判断：`state.full`、segment数量及所有输出读取成功即返回final；segment文本读取失败从静默跳过改为带索引的错误传播。原有partial透传、错误保留、catchup及用户显式恢复合同保持原样，未隐藏告警或强制确认失败结果。
+
+- 真实模型RED：新增ignored回归`completed_short_chinese_decode_is_final`，以10.314875秒合成中文PCM和实际`large-v3-turbo-q5_0`调用生产routine入口；Metal／Apple M5完整输出中文却`partial=true`，断言失败，准确采集Cargo退出101、0通过／1失败。首次同样复现，但外层zsh用只读status变量导致退出码采集失败，未把推测码写作证据；随后直接采集的RED日志为`red-exit.log`。
+- 修复后同一真实模型回归退出0，1通过／0失败、1.51秒，完整中文尾句保留且`partial=false`。模型SHA1为`e050f7970618a659205450ad97eb95a18d69c9ee`，与[上游GGML清单](https://huggingface.co/ggerganov/whisper.cpp)一致；fixture来自本机中文TTS，未使用用户会议。
+- Whisper默认定向18通过／0失败／3忽略；持久队列5通过／0失败，包含排空、结果检查点及重启后不再重放已完成输入。全量`scripts/check-enhancement.sh --native`退出0，395项中388通过、0失败、7忽略，21.46秒。新增真实模型用例默认忽略，但本轮已另行显式执行；其余模型／外部样本门禁未据此视为通过。
+- 主代理实现并核对实际日志，Astra只读复核完成语义，Luna执行RED、真实模型GREEN、定向和全量检查。未修改前端、迁移、转写语言设置或已保存会议；无需为本项重复前端测试。原生检查仍有既存编译warning，未影响退出码。
+
+真实native segment读取失败未做故障注入，其错误传播由代码结构复核；样例只证明本输入的中文保留和完成状态，不证明中文总体准确率、长录音或真实麦克风实时质量。本轮仅只读核对用户记录的状态和恢复文件数量，未回放、重新识别、覆盖或删除原记录。旧记录的incomplete状态不会被这次代码修复自动清除，需用户显式补处理；新包安装／启动与后续现场复测分别记录。
+
 ## P0 / F4 工程验证
 
 - 数据库恢复：异常打开前保留 DB/WAL/SHM；SHA256清单、私有目录、fsync与发布后读回。备份失败不会继续破坏原始文件。正常升级用 SQLite online snapshot，测试包含未checkpoint的已提交WAL和迁移前旧数据。没有自动删除原WAL或声称能修复损坏的数据库。依据：[SQLite VACUUM INTO](https://www.sqlite.org/lang_vacuum.html)。

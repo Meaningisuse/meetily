@@ -612,7 +612,7 @@ impl WhisperEngine {
         repeated_words as f32 / total_words
     }
     
-    /// Transcribe audio with streaming support for partial results and adaptive quality
+    /// Decode one complete audio block with confidence and completion state.
     pub async fn transcribe_audio_with_confidence(&self, audio_data: Vec<f32>, language: Option<String>) -> Result<(String, f32, bool)> {
         let (text, confidence, is_partial, _) = self
             .transcribe_audio_with_mode(audio_data, language, false)
@@ -722,9 +722,6 @@ impl WhisperEngine {
             // Removed debug log to reduce I/O overhead in transcription hot path
         }
 
-        let duration_seconds = audio_data.len() as f64 / 16000.0;
-        let is_partial = duration_seconds < 15.0; // Consider chunks under 15s as partial
-
         // PERFORMANCE: Suppress verbose C library logs during transcription
         // This hides whisper_full_with_state debug logs and beam search details
         let (num_segments, state) = {
@@ -744,10 +741,10 @@ impl WhisperEngine {
 
         let num_segments = num_segments?;
         for i in 0..num_segments {
-            let segment_text = match state.full_get_segment_text_lossy(i) {
-                Ok(text) => text,
-                Err(_) => continue,
-            };
+            // Never acknowledge a decode whose native output could not be read:
+            // callers retain its original audio through the existing error path.
+            let segment_text = state.full_get_segment_text_lossy(i)
+                .map_err(|error| anyhow!("Could not read Whisper segment {i}: {error}"))?;
 
             // Calculate confidence based on segment length and duration (simplified approach)
             let segment_length = segment_text.len() as f32;
@@ -784,7 +781,9 @@ impl WhisperEngine {
             0.0
         };
 
-        Ok((cleaned_result, avg_confidence, is_partial, timestamp_segments))
+        // `full` consumed this entire input block and every output segment was
+        // read successfully. Short VAD utterances are final results too.
+        Ok((cleaned_result, avg_confidence, false, timestamp_segments))
     }
 
     pub async fn transcribe_audio(&self, audio_data: Vec<f32>, language: Option<String>) -> Result<String> {
@@ -1531,6 +1530,36 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("No model loaded"));
+    }
+
+    /// Real native regression for VAD-sized completed utterances. A successful
+    /// full decode is final even when its input is shorter than fifteen seconds.
+    #[tokio::test]
+    #[ignore = "requires a multilingual model and a short generated Chinese WAV"]
+    async fn completed_short_chinese_decode_is_final() {
+        let model_path = std::env::var("WHISPER_TIMING_TEST_MODEL").expect("set model path");
+        let audio_path = std::env::var("WHISPER_TIMING_TEST_AUDIO").expect("set short Chinese WAV");
+        let directory = tempfile::tempdir().unwrap();
+        let engine = WhisperEngine::new_with_models_dir(Some(directory.path().to_path_buf())).unwrap();
+        let context = WhisperContext::new_with_params(
+            &model_path,
+            WhisperContextParameters {
+                use_gpu: std::env::var_os("WHISPER_TIMING_USE_METAL").is_some(),
+                ..Default::default()
+            },
+        ).unwrap();
+        *engine.current_context.write().await = Some(context);
+        *engine.current_model.write().await = Some("short-final-regression".into());
+        let audio = crate::audio::decoder::decode_audio_file(std::path::Path::new(&audio_path))
+            .unwrap().into_whisper_format().unwrap();
+        assert!(!audio.is_empty() && audio.len() < 15 * 16000,
+            "the fixture must exercise the old under-fifteen-seconds classification");
+        let (text, confidence, partial, _, _) = engine
+            .transcribe_audio_with_verified_timing(audio, Some("zh".into())).await.unwrap();
+        eprintln!("short native output={text:?}, confidence={confidence}, partial={partial}");
+        assert!(text.chars().any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)),
+            "Chinese speech should retain Chinese text");
+        assert!(!partial, "successfully decoded short audio is final, not a retryable partial result");
     }
 
     /// Run manually with a multilingual Whisper model and generated Chinese
