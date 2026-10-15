@@ -517,19 +517,42 @@ async fn start_recording(
             "Desktop state is unavailable.",
         ))
     })?;
-    let key = idempotency_key(&headers)?;
     let payload = serde_json::to_value(&request)
         .map_err(|_| ApiError(EnhancementError::invalid("Invalid request body.")))?;
-    let response =
-        super::idempotency::run(&state.pool, &client.id, &key, &payload, || async move {
-            let session_id = crate::audio::recording_commands::automation_start_recording(
+    start_recording_with_action(
+        state.pool,
+        client.id,
+        headers,
+        payload,
+        move || async move {
+            crate::audio::recording_commands::automation_start_recording(
                 app,
                 request.mic_device_name,
                 request.system_device_name,
                 request.meeting_name,
             )
             .await
-            .map_err(|e| {
+        },
+    )
+    .await
+}
+
+// Share HTTP ownership and result persistence with hardware-free regression tests.
+pub(super) async fn start_recording_with_action<F, Fut>(
+    pool: SqlitePool,
+    client_id: String,
+    headers: axum::http::HeaderMap,
+    payload: serde_json::Value,
+    start: F,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
+{
+    let key = idempotency_key(&headers)?;
+    let response =
+        super::idempotency::run_detached(&pool, &client_id, &key, &payload, move || async move {
+            let session_id = start().await.map_err(|e| {
                 if e.starts_with("CONFLICT:") {
                     EnhancementError::new("CONFLICT", e.trim_start_matches("CONFLICT: "))
                 } else if e.starts_with("BUSY:") {

@@ -6,7 +6,7 @@ use sqlx::SqlitePool;
 use std::future::Future;
 
 /// Own the entire accepted operation, including its idempotency reservation and
-/// result write. Dropping the HTTP waiter must not cancel recording finalization.
+/// result write. Dropping the HTTP waiter must not cancel recording startup or finalization.
 /// Process shutdown and panics still require the existing recovery workflow.
 pub(crate) async fn run_detached<T, F, Fut>(
     pool: &SqlitePool,

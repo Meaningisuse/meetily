@@ -99,6 +99,17 @@ AppState.jobs持有实例级ResourceScheduler，录音、本地摘要、导入�
 
 前端测试替换原生／联网边界，原生检查完成编译及库测试；本项未重新打包、安装或启动.app，未执行真实用户升级。仍引用`.sig`／`latest.json`的CI发布流程未改造或验收，因此不能宣称内部安装包发布、签名、回滚及实际升级已完成。没有读取真实会议、音频、Keychain或加载真实模型。
 
+## 2026-10-15 API 开始录音请求取消安全
+
+开始录音HTTP入口现通过`start_recording_with_action`与已有`run_detached`持有完整幂等登记、原生初始化和成功响应持久化，20秒HTTP超时或waiter取消不再丢弃已接收操作。API原生包装使用`try_lock`即时拒绝录音操作锁竞争，直接调用既有inner，并在持锁期间读取本次session；不会在长停录后排队迟到启动。保留原请求字段校验、scope、请求哈希、15秒资源等待与成功响应结构。桌面公开开始包装和停录实现保持原合同。
+
+- 红测：API锁竞争回归在旧等待实现下50毫秒未返回，退出101、0通过／1失败；生产guard的真实20秒deadline后仍无成功结果，25.02秒时断言失败，退出101、0通过／1失败；取消waiter后5秒未完成结果／错误清理，退出101、0通过／1失败。三项均编译成功并按预期业务断言失败。
+- 修复后三项定向分别1通过／0失败，退出0；HTTP用例实际20.03秒。成功后原key重放同session且只执行一次，进行中同key为BUSY；关闭入口阻止新请求但已接收操作仍完成。abort用例覆盖成功持久化、普通BUSY错误清理及重新提交、不同body同key冲突。
+- 最终`scripts/check-enhancement.sh --native`退出0，391项中385通过、0失败、6忽略，22.00秒。使用既有CMake及进程级Xcode覆盖；helper1条、build script1条、lib test11条warning未影响退出码。未安装依赖，未改全局环境。
+- Astra完成只读方案与代码复核，主代理实现及设计回归，Luna执行RED、定向GREEN和完整原生检查。测试共用生产HTTP guard及action helper，以合成action代替设备初始化；字段校验与锁内读取session由源代码结构复核，不将其写成已完成设备验收。
+
+超时后录音仍可能开始，客户端应使用原key及相同请求体重试取得session，不能当作未执行而自动换key。文档同步见[原生HTTP开始录音](INTERNAL_AUTOMATION.md#原生-http-开始录音与超时重试)。测试未启动设备、加载模型、访问真实会议或Keychain，也没有打包／启动.app；panic、结果写入失败及应用退出后恢复仍沿用保守边界。本项不宣称所有写API均已取消安全：摘要创建与普通任务取消的内联执行缺口仍需独立修复。
+
 ## P0 / F4 工程验证
 
 - 数据库恢复：异常打开前保留 DB/WAL/SHM；SHA256清单、私有目录、fsync与发布后读回。备份失败不会继续破坏原始文件。正常升级用 SQLite online snapshot，测试包含未checkpoint的已提交WAL和迁移前旧数据。没有自动删除原WAL或声称能修复损坏的数据库。依据：[SQLite VACUUM INTO](https://www.sqlite.org/lang_vacuum.html)。

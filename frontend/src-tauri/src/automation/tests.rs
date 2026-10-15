@@ -162,6 +162,257 @@ async fn stop_deadline_only_ends_http_wait_and_retries_replay_final_result() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn start_deadline_only_ends_http_wait_and_retries_replay_final_session() {
+    use super::server::{guard, start_recording_with_action, GatewayState};
+    use super::types::{ClientBrief, Discovery};
+    use axum::{
+        extract::{Extension, State},
+        middleware,
+        routing::post,
+        Router,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    let pool = pool().await;
+    let clients = ClientService::new(pool.clone(), Arc::new(TestVault::default()));
+    let token = clients
+        .create(
+            "start regression",
+            vec![Scope::Record],
+            chrono::Utc::now() + chrono::Duration::days(1),
+        )
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let base_url = format!("http://{}/api/internal/v1", listener.local_addr().unwrap());
+    let enabled = Arc::new(AtomicBool::new(true));
+    let state = GatewayState {
+        pool: pool.clone(),
+        clients,
+        discovery: Discovery {
+            pid: std::process::id(),
+            instance_id: "start-regression".into(),
+            base_url: base_url.clone(),
+            protocol_version: 1,
+        },
+        enabled: enabled.clone(),
+        rates: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        reads: Arc::new(tokio::sync::Semaphore::new(4)),
+        app: None,
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let finish = Arc::new(tokio::sync::Notify::new());
+    let action_calls = calls.clone();
+    let action_started = started.clone();
+    let action_finish = finish.clone();
+    let router = Router::new()
+        .route(
+            "/api/internal/v1/recordings/start",
+            post(
+                move |State(state): State<GatewayState>,
+                      Extension(client): Extension<ClientBrief>,
+                      headers: axum::http::HeaderMap,
+                      axum::Json(payload): axum::Json<serde_json::Value>| {
+                    let calls = action_calls.clone();
+                    let started = action_started.clone();
+                    let finish = action_finish.clone();
+                    async move {
+                        start_recording_with_action(
+                            state.pool,
+                            client.id,
+                            headers,
+                            payload,
+                            move || async move {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                started.notify_one();
+                                finish.notified().await;
+                                Ok("session-one".to_string())
+                            },
+                        )
+                        .await
+                    }
+                },
+            ),
+        )
+        .layer(middleware::from_fn_with_state(state.clone(), guard))
+        .with_state(state);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .no_proxy()
+        .build()
+        .unwrap();
+    let url = format!("{base_url}/recordings/start");
+    let request = || {
+        http.post(&url)
+            .bearer_auth(&token.token)
+            .header("Idempotency-Key", "http-start")
+            .json(&serde_json::json!({"meeting_name":"Synthetic start"}))
+    };
+    let before = Instant::now();
+    let first_request = tokio::spawn(request().send());
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("start action must begin");
+    let first = first_request.await.unwrap().unwrap();
+    assert_eq!(first.status(), 503);
+    let first: serde_json::Value = first.json().await.unwrap();
+    assert_eq!(first["error"]["code"], "BUSY");
+    assert_eq!(first["error"]["message"], "Request deadline exceeded");
+    assert!(
+        before.elapsed() >= Duration::from_secs(19),
+        "must exercise the production 20-second deadline"
+    );
+
+    let pending = request().send().await.unwrap();
+    assert_eq!(pending.status(), 503);
+    let pending: serde_json::Value = pending.json().await.unwrap();
+    assert_eq!(pending["error"]["code"], "BUSY");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Disabling new requests must not cancel an already accepted start.
+    enabled.store(false, Ordering::SeqCst);
+    let disabled: serde_json::Value = request().send().await.unwrap().json().await.unwrap();
+    assert_eq!(disabled["error"]["code"], "NOT_READY");
+    finish.notify_one();
+    let saved = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let result: Option<String> = sqlx::query_scalar("SELECT response_json FROM automation_requests WHERE client_id=? AND key='http-start'")
+                .bind(&token.client.id).fetch_one(&pool).await.unwrap();
+            if let Some(result) = result { break serde_json::from_str::<serde_json::Value>(&result).unwrap(); }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.expect("start must finish and persist after HTTP timeout and gateway disable");
+    assert_eq!(
+        saved,
+        serde_json::json!({"session_id":"session-one","status":"recording"})
+    );
+    enabled.store(true, Ordering::SeqCst);
+    let replay = request().send().await.unwrap();
+    assert_eq!(replay.status(), 200);
+    assert_eq!(replay.json::<serde_json::Value>().await.unwrap(), saved);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let _ = shutdown_tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn start_waiter_abort_preserves_completion_and_normal_error_cleanup() {
+    use super::server::start_recording_with_action;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    for fail in [false, true] {
+        let pool = pool().await;
+        let clients = ClientService::new(pool.clone(), Arc::new(TestVault::default()));
+        let token = clients
+            .create(
+                "abort start",
+                vec![Scope::Record],
+                chrono::Utc::now() + chrono::Duration::days(1),
+            )
+            .await
+            .unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("Idempotency-Key", "aborted-start".parse().unwrap());
+        let payload = serde_json::json!({"meeting_name":"Abort fixture"});
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let task_pool = pool.clone();
+        let client_id = token.client.id.clone();
+        let task_headers = headers.clone();
+        let task_payload = payload.clone();
+        let task_calls = calls.clone();
+        let waiter = tokio::spawn(async move {
+            start_recording_with_action(
+                task_pool,
+                client_id,
+                task_headers,
+                task_payload,
+                move || async move {
+                    task_calls.fetch_add(1, Ordering::SeqCst);
+                    let _ = started_tx.send(());
+                    let _ = finish_rx.await;
+                    if fail {
+                        Err("BUSY: No local resource available".into())
+                    } else {
+                        Ok("accepted-session".into())
+                    }
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        waiter.abort();
+        match waiter.await {
+            Err(error) => assert!(error.is_cancelled()),
+            Ok(_) => panic!("waiter should have been cancelled"),
+        }
+        let _ = finish_tx.send(());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let row: Option<Option<String>> = sqlx::query_scalar(
+                    "SELECT response_json FROM automation_requests WHERE client_id=? AND key='aborted-start'")
+                    .bind(&token.client.id).fetch_optional(&pool).await.unwrap();
+                if fail && row.is_none() { break; }
+                if !fail && row.as_ref().is_some_and(|r| r.is_some()) { break; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("accepted start must finish its result or business-error cleanup after waiter abort");
+        let retry_calls = calls.clone();
+        let result = start_recording_with_action(
+            pool.clone(),
+            token.client.id.clone(),
+            headers.clone(),
+            payload,
+            move || async move {
+                retry_calls.fetch_add(1, Ordering::SeqCst);
+                Ok("retried-session".into())
+            },
+        )
+        .await
+        .unwrap_or_else(|_| panic!("start retry should succeed"));
+        assert_eq!(
+            result.0,
+            serde_json::json!({
+                "session_id":if fail { "retried-session" } else { "accepted-session" },
+                "status":"recording"
+            })
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), if fail { 2 } else { 1 });
+        let conflict = start_recording_with_action(
+            pool,
+            token.client.id,
+            headers,
+            serde_json::json!({"meeting_name":"Changed body"}),
+            || async { panic!("conflict must not start capture") },
+        )
+        .await
+        .err()
+        .expect("same key with a different body must conflict");
+        assert_eq!(conflict.0.code, "CONFLICT");
+    }
+}
+
 impl Vault for TestVault {
     fn put(&self, id: &str, value: &str) -> Result<(), String> {
         if self.fail {

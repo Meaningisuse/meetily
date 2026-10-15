@@ -59,8 +59,13 @@ mod automation_session_tests {
     }
 
     #[tokio::test]
-    async fn automation_stop_rejects_lock_contention_without_queueing() {
+    async fn automation_start_and_stop_reject_lock_contention_without_queueing() {
         let operation = RECORDING_OPERATION_LOCK.lock().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            super::acquire_automation_start_operation(),
+        ).await.expect("API start must reject contention immediately rather than queue");
+        assert_eq!(result.unwrap_err(), "BUSY: Another recording operation is in progress");
         let error = acquire_automation_stop_operation("stale-test-session").unwrap_err();
         assert_eq!(error, "BUSY: Another recording operation is in progress");
         drop(operation);
@@ -92,7 +97,8 @@ pub async fn automation_start_recording<R: Runtime>(
     system_device_name: Option<String>,
     meeting_name: Option<String>,
 ) -> Result<String, String> {
-    start_recording_with_devices_and_meeting(
+    let _operation = acquire_automation_start_operation().await?;
+    start_recording_with_devices_and_meeting_inner(
         app,
         mic_device_name,
         system_device_name,
@@ -100,6 +106,15 @@ pub async fn automation_start_recording<R: Runtime>(
     )
     .await?;
     active_recording_session_id().ok_or_else(|| "Recording session was not initialized".into())
+}
+
+async fn acquire_automation_start_operation(
+) -> Result<tokio::sync::MutexGuard<'static, ()>, String> {
+    // API starts must not accumulate behind a long stop and begin capturing
+    // later after their HTTP waiter has already timed out.
+    RECORDING_OPERATION_LOCK
+        .try_lock()
+        .map_err(|_| "BUSY: Another recording operation is in progress".to_string())
 }
 
 pub async fn automation_stop_recording<R: Runtime>(
