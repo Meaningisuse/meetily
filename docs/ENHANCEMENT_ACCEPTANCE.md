@@ -16,6 +16,17 @@
 
 以上测试使用合成停录 action、测试数据库和内存 Vault，没有采集设备音频、加载模型或操作真实 Keychain。它们验证请求取消安全和幂等行为，不代表真实转写积压、文件保存与原生停录终态已完成现场验收；应用退出、runtime shutdown 和原生停录 panic 的业务恢复仍沿用既有边界。此修复不改变P3真实助手连接或P4说话人效果门禁。
 
+## 2026-10-15 导入与重转写的 PCM 边界
+
+新增共享 `BatchAudioLimits` 和音频批处理 lease：默认应用PCM工作预算2 GiB、scratch256 MiB、单packet16 MiB、FFmpeg临时WAV512 MiB。实际解码的rate/channels和累计capacity逐包受限；消费式原地mono/归一化、固定窗口串行sinc、VAD输出capacity检查及逐段移动替代全量复制。导入、重转写和metadata失败后的解码回退共享准入；阻塞任务及完成结果在释放PCM前持有lease。争用错误继续向前端发出既有错误事件。
+
+- 红测：小预算WAV解码和预先取消两个回归在旧路径均收到成功结果，0通过/2失败，Cargo退出101；修复后通过。
+- 定向音频检查：`cargo test --locked -p meetily --lib audio:: -- --nocapture` 退出0，144通过/0失败/4忽略；随后补充容量拒绝及已完成结果lease保持两项回归。
+- 完整原生检查：`scripts/check-enhancement.sh --native` 退出0，358通过/0失败/6忽略（364项）；包含上述新增14项回归及之前停录20秒deadline回归。检查使用仓库CMake3.31.6和当前进程指定的Xcode；已有13条编译warning未影响退出码。模型/设备依赖测试保持忽略，未下载模型或启动真实录音。
+- 覆盖实际WAV超限、packet间取消、capacity扩容前拒绝、上采样及整数边界、mono移动、串行sinc抗混叠与取消、VAD输出预算、片段时间保留、真实FFmpeg触限文件拒绝与临时清理、合成子进程回收和共享lease生命周期。
+
+这是应用层分配规则及取消验证，没有实测整个应用RSS或长会议识别质量。120分钟16 kHz mono仅通过默认预算算术检查，不是两小时导入验收。重转写预算失败仍在旧转写替换事务之前返回，这一结论由控制流复核支持，没有新增真实旧库故障注入测试。完整默认上限、源格式对可接受长度的影响、FFmpeg有限超调及取消粒度见[音频批处理边界](BATCH_AUDIO_LIMITS.md)。
+
 ## P0 / F4 工程验证
 
 - 数据库恢复：异常打开前保留 DB/WAL/SHM；SHA256清单、私有目录、fsync与发布后读回。备份失败不会继续破坏原始文件。正常升级用 SQLite online snapshot，测试包含未checkpoint的已提交WAL和迁移前旧数据。没有自动删除原WAL或声称能修复损坏的数据库。依据：[SQLite VACUUM INTO](https://www.sqlite.org/lang_vacuum.html)。

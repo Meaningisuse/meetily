@@ -440,11 +440,36 @@ pub fn get_speech_chunks(
 pub fn get_speech_chunks_with_progress<F>(
     samples_mono_16k: &[f32],
     redemption_time_ms: u32,
+    progress_callback: F,
+) -> Result<Vec<SpeechSegment>>
+where
+    F: FnMut(u32, usize) -> bool,
+{
+    get_speech_chunks_with_limits(
+        samples_mono_16k,
+        samples_mono_16k.len(),
+        redemption_time_ms,
+        super::batch_limits::BatchAudioLimits::default(),
+        &|| false,
+        progress_callback,
+    )
+}
+
+pub(crate) fn get_speech_chunks_with_limits<F>(
+    samples_mono_16k: &[f32],
+    input_capacity: usize,
+    redemption_time_ms: u32,
+    limits: super::batch_limits::BatchAudioLimits,
+    cancelled: &dyn Fn() -> bool,
     mut progress_callback: F,
 ) -> Result<Vec<SpeechSegment>>
 where
     F: FnMut(u32, usize) -> bool,
 {
+    if cancelled() {
+        return Err(anyhow!("VAD processing cancelled"));
+    }
+    limits.check_vad_capacity(input_capacity, 0)?;
     let mut processor = ContinuousVadProcessor::new(16000, redemption_time_ms)?;
 
     let total_samples = samples_mono_16k.len();
@@ -454,6 +479,7 @@ where
     const CHUNK_SIZE: usize = 160_000; // 10 seconds at 16kHz
 
     let mut all_segments = Vec::new();
+    let mut output_capacity = 0usize;
 
     if total_samples > LARGE_FILE_THRESHOLD {
         info!(
@@ -468,6 +494,9 @@ where
         let total_chunks = (total_samples + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
         for chunk in samples_mono_16k.chunks(CHUNK_SIZE) {
+            if cancelled() {
+                return Err(anyhow!("VAD processing cancelled"));
+            }
             chunk_count += 1;
 
             let start_time = std::time::Instant::now();
@@ -491,13 +520,22 @@ where
                 );
             }
 
-            all_segments.extend(segments);
+            append_segments_checked(
+                &mut all_segments,
+                segments,
+                &mut output_capacity,
+                input_capacity,
+                limits,
+            )?;
+            if cancelled() {
+                return Err(anyhow!("VAD processing cancelled"));
+            }
 
             processed += chunk.len();
             let progress = ((processed * 100) / total_samples) as u32;
 
             // Call progress callback every 5%
-            if progress >= last_progress + 5 {
+            if progress >= last_progress + 5 && progress < 100 {
                 debug!(
                     "VAD: Progress {}% ({} segments found so far)",
                     progress,
@@ -515,7 +553,13 @@ where
         }
 
         let final_segments = processor.flush()?;
-        all_segments.extend(final_segments);
+        append_segments_checked(
+            &mut all_segments,
+            final_segments,
+            &mut output_capacity,
+            input_capacity,
+            limits,
+        )?;
 
         info!(
             "VAD: Complete! Found {} speech segments",
@@ -523,17 +567,85 @@ where
         );
     } else {
         // Small file - process all at once
-        all_segments = processor.process_audio(samples_mono_16k)?;
+        let segments = processor.process_audio(samples_mono_16k)?;
+        append_segments_checked(
+            &mut all_segments,
+            segments,
+            &mut output_capacity,
+            input_capacity,
+            limits,
+        )?;
         let final_segments = processor.flush()?;
-        all_segments.extend(final_segments);
+        append_segments_checked(
+            &mut all_segments,
+            final_segments,
+            &mut output_capacity,
+            input_capacity,
+            limits,
+        )?;
     }
 
+    if cancelled() || !progress_callback(100, all_segments.len()) {
+        return Err(anyhow!("VAD processing cancelled"));
+    }
     Ok(all_segments)
+}
+
+fn append_segments_checked(
+    output: &mut Vec<SpeechSegment>,
+    segments: Vec<SpeechSegment>,
+    capacity: &mut usize,
+    input_capacity: usize,
+    limits: super::batch_limits::BatchAudioLimits,
+) -> Result<()> {
+    let added = segments
+        .iter()
+        .try_fold(0usize, |total, s| total.checked_add(s.samples.capacity()))
+        .ok_or(super::batch_limits::AudioBudgetExceeded)?;
+    *capacity = capacity
+        .checked_add(added)
+        .ok_or(super::batch_limits::AudioBudgetExceeded)?;
+    limits.check_vad_capacity(input_capacity, *capacity)?;
+    output.extend(segments);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_vad_checks_cancel_before_loading_model_and_output_capacity() {
+        assert!(get_speech_chunks_with_limits(
+            &[],
+            0,
+            2000,
+            Default::default(),
+            &|| true,
+            |_, _| true
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("cancelled"));
+        let segment = SpeechSegment {
+            samples: vec![0.1; 100],
+            start_timestamp_ms: 0.0,
+            end_timestamp_ms: 6.25,
+            confidence: 0.9,
+        };
+        let limits = super::super::batch_limits::BatchAudioLimits {
+            working_bytes: 512,
+            scratch_bytes: 64,
+            ..Default::default()
+        };
+        let mut output = Vec::new();
+        let mut capacity = 0;
+        assert!(
+            append_segments_checked(&mut output, vec![segment], &mut capacity, 100, limits)
+                .is_err()
+        );
+        assert!(output.is_empty());
+    }
 
     /// Generate synthetic speech-like audio with alternating speech/silence
     fn generate_test_audio_with_speech(duration_seconds: f32, sample_rate: u32) -> Vec<f32> {

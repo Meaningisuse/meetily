@@ -116,6 +116,28 @@ mod timed_transcript_tests {
         assert_eq!(segments[0].audio_end_time, Some(1.8));
         assert_eq!(segments[0].timing_precision.as_deref(), Some("exact"));
     }
+
+    #[test]
+    fn batch_segment_preparation_moves_samples_and_preserves_times() {
+        let samples = vec![0.2f32; 4000];
+        let pointer = samples.as_ptr();
+        let segment = crate::audio::vad::SpeechSegment {
+            samples,
+            start_timestamp_ms: 1200.0,
+            end_timestamp_ms: 1450.0,
+            confidence: 0.9,
+        };
+        let output =
+            super::prepare_speech_segments(vec![segment], 25 * 16000, Default::default(), &|| {
+                false
+            })
+            .unwrap();
+        assert_eq!(output[0].samples.as_ptr(), pointer);
+        assert_eq!(
+            (output[0].start_timestamp_ms, output[0].end_timestamp_ms),
+            (1200.0, 1450.0)
+        );
+    }
 }
 
 /// Write transcripts.json to a meeting folder (atomic write with temp file)
@@ -153,6 +175,43 @@ pub(crate) fn write_transcripts_json(folder: &Path, segments: &[TranscriptSegmen
     Ok(())
 }
 
+/// Move ordinary segments; only the current oversized segment needs copies.
+pub(crate) fn prepare_speech_segments(
+    segments: Vec<crate::audio::vad::SpeechSegment>,
+    maximum: usize,
+    limits: super::batch_limits::BatchAudioLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<crate::audio::vad::SpeechSegment>> {
+    if maximum <= 16_000 {
+        return Err(anyhow::anyhow!("Invalid speech segment size"));
+    }
+    let mut capacity = segments
+        .iter()
+        .try_fold(0usize, |n, s| n.checked_add(s.samples.capacity()))
+        .ok_or(super::batch_limits::AudioBudgetExceeded)?;
+    limits.check_vad_capacity(0, capacity)?;
+    let mut output = Vec::new();
+    for segment in segments {
+        if cancelled() {
+            return Err(anyhow::anyhow!("Audio processing cancelled"));
+        }
+        if segment.samples.len() <= maximum {
+            output.push(segment);
+            continue;
+        }
+        let split = split_segment_at_silence(&segment, maximum);
+        capacity -= segment.samples.capacity();
+        for part in &split {
+            capacity = capacity
+                .checked_add(part.samples.capacity())
+                .ok_or(super::batch_limits::AudioBudgetExceeded)?;
+        }
+        limits.check_vad_capacity(0, capacity)?;
+        output.extend(split);
+    }
+    Ok(output)
+}
+
 /// Split a long speech segment at the lowest-energy (silence) point near the target size.
 ///
 /// Scans for 100ms windows with minimal RMS energy within +/-3 seconds of each target
@@ -177,8 +236,8 @@ pub(crate) fn split_segment_at_silence(
         return vec![segment.clone()];
     }
 
-    let ms_per_sample = (segment.end_timestamp_ms - segment.start_timestamp_ms)
-        / segment.samples.len() as f64;
+    let ms_per_sample =
+        (segment.end_timestamp_ms - segment.start_timestamp_ms) / segment.samples.len() as f64;
     let mut result = Vec::new();
     let mut pos = 0usize;
 

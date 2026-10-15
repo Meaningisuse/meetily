@@ -2,6 +2,7 @@
 pub mod audio_processing;
 pub mod playback;
 pub mod decoder;
+pub(crate) mod batch_limits;
 pub mod encode;
 pub mod ffmpeg;
 pub mod time_map;

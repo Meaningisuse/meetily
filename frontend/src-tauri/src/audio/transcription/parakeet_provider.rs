@@ -241,7 +241,7 @@ mod tests {
             std::env::var("PARAKEET_TIMING_TEST_AUDIO").expect("set PARAKEET_TIMING_TEST_AUDIO");
         let audio = crate::audio::decoder::decode_audio_file(std::path::Path::new(&audio_path))
             .expect("decode timing fixture");
-        let samples = audio.to_whisper_format();
+        let samples = audio.into_whisper_format().expect("convert timing fixture");
         let duration_ms = (samples.len() as f64 / 16_000.0 * 1000.0).round() as i64;
         let mut model = crate::parakeet_engine::ParakeetModel::new(model_dir, true)
             .expect("load Parakeet ONNX model");

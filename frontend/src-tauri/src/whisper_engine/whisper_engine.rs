@@ -1365,7 +1365,7 @@ mod tests {
 
         let audio = crate::audio::decoder::decode_audio_file(std::path::Path::new(&audio_path))
             .unwrap()
-            .to_whisper_format();
+            .into_whisper_format().expect("convert timing fixture");
         let (canonical_text, _, _, _) = engine
             .transcribe_audio_with_mode(audio.clone(), Some("zh".into()), false)
             .await
@@ -1429,7 +1429,7 @@ mod tests {
 
         let audio = crate::audio::decoder::decode_audio_file(std::path::Path::new(&audio_path))
             .unwrap()
-            .to_whisper_format();
+            .into_whisper_format().expect("convert timing fixture");
         let (_, _, _, timed_segments, precision) = engine
             .transcribe_audio_with_verified_timing(audio, Some("zh".into()))
             .await

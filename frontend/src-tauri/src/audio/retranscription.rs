@@ -1,9 +1,10 @@
 // Retranscription module - allows re-processing stored audio with different settings
 
-use crate::audio::decoder::decode_audio_file;
+use crate::audio::decoder::decode_audio_file_controlled;
 use crate::audio::transcription::{provider::offset_timed_segments, TimingPrecision};
-use crate::audio::vad::get_speech_chunks_with_progress;
-use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json, TranscriptInput};
+use crate::audio::vad::get_speech_chunks_with_limits;
+use super::batch_limits::{BatchAudioLease, BatchAudioLimits};
+use super::common::{create_transcript_segments, prepare_speech_segments, write_transcripts_json, TranscriptInput};
 use super::constants::AUDIO_EXTENSIONS;
 use crate::config::{DEFAULT_WHISPER_MODEL, DEFAULT_PARAKEET_MODEL};
 use crate::parakeet_engine::ParakeetEngine;
@@ -100,14 +101,19 @@ pub async fn start_retranscription<R: Runtime>(
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = RetranscriptionGuard::acquire().map_err(|e| anyhow!(e))?;
 
-    // Reset cancellation flag
-    RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
-
     let use_parakeet = provider.as_deref() == Some("parakeet");
-    let result = run_retranscription(app.clone(), meeting_id.clone(), meeting_folder_path, language, model, provider).await;
+    let result = async {
+        let batch_lease = BatchAudioLease::try_acquire()?;
 
-    // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch(use_parakeet).await;
+        // Reset cancellation flag
+        RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
+
+        let result = run_retranscription(app.clone(), meeting_id.clone(), meeting_folder_path, language, model, provider, &batch_lease).await;
+
+        // Unload the engine after the batch job (success, failure, or cancellation)
+        super::common::unload_engine_after_batch(use_parakeet).await;
+        result
+    }.await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -178,9 +184,12 @@ async fn run_retranscription<R: Runtime>(
     language: Option<String>,
     model: Option<String>,
     provider: Option<String>,
+    batch_lease: &BatchAudioLease,
 ) -> Result<RetranscriptionResult> {
+    let limits = BatchAudioLimits::default();
     let folder_path = PathBuf::from(&meeting_folder_path);
     let audio_path = find_audio_file(&folder_path)?;
+    super::batch_limits::check_source_file(&audio_path)?;
 
     // Determine which provider to use (default to whisper)
     let use_parakeet = provider.as_deref() == Some("parakeet");
@@ -200,11 +209,11 @@ async fn run_retranscription<R: Runtime>(
 
     // Decode the audio file (CPU-intensive, run in blocking task)
     let path_for_decode = audio_path.clone();
-    let decoded = tokio::task::spawn_blocking(move || {
-        decode_audio_file(&path_for_decode)
+    let decoded = batch_lease.spawn_blocking(move || {
+        decode_audio_file_controlled(&path_for_decode, None, limits, &|| RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst))
     })
     .await
-    .map_err(|e| anyhow!("Decode task panicked: {}", e))??;
+    .map_err(|e| anyhow!("Decode task panicked: {}", e))?.0?;
     let duration_seconds = decoded.duration_seconds;
 
     info!(
@@ -220,11 +229,11 @@ async fn run_retranscription<R: Runtime>(
     }
 
     // Convert to 16kHz mono format (CPU-intensive, run in blocking task)
-    let audio_samples = tokio::task::spawn_blocking(move || {
-        decoded.to_whisper_format()
+    let audio_samples = batch_lease.spawn_blocking(move || {
+        decoded.into_whisper_format_controlled(None, limits, &|| RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst))
     })
     .await
-    .map_err(|e| anyhow!("Resample task panicked: {}", e))?;
+    .map_err(|e| anyhow!("Resample task panicked: {}", e))?.0?;
     info!("Converted to 16kHz mono format: {} samples", audio_samples.len());
 
     emit_progress(&app, &meeting_id, "vad", 20, "Detecting speech segments...");
@@ -240,10 +249,10 @@ async fn run_retranscription<R: Runtime>(
     let app_for_vad = app.clone();
     let meeting_id_for_vad = meeting_id.clone();
 
-    let speech_segments = tokio::task::spawn_blocking(move || {
-        get_speech_chunks_with_progress(
-            &audio_samples,
-            VAD_REDEMPTION_TIME_MS,
+    let speech_segments = batch_lease.spawn_blocking(move || {
+        get_speech_chunks_with_limits(
+            &audio_samples, audio_samples.capacity(),
+            VAD_REDEMPTION_TIME_MS, limits, &|| RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst),
             |vad_progress, segments_found| {
                 // Map VAD progress (0-100) to overall progress (20-25)
                 let overall_progress = 20 + (vad_progress as f32 * 0.05) as u32;
@@ -261,7 +270,7 @@ async fn run_retranscription<R: Runtime>(
         )
     })
     .await
-    .map_err(|e| anyhow!("VAD task panicked: {}", e))?
+    .map_err(|e| anyhow!("VAD task panicked: {}", e))?.0
     .map_err(|e| anyhow!("VAD processing failed: {}", e))?;
 
     let total_segments = speech_segments.len();
@@ -317,22 +326,10 @@ async fn run_retranscription<R: Runtime>(
     // for the lowest-energy window near the target split point and cut there.
     const MAX_SEGMENT_SAMPLES: usize = 25 * 16000; // 25 seconds at 16kHz
 
-    let mut processable_segments: Vec<crate::audio::vad::SpeechSegment> = Vec::new();
-    for segment in &speech_segments {
-        if segment.samples.len() > MAX_SEGMENT_SAMPLES {
-            debug!(
-                "Splitting large segment ({:.0}ms, {} samples) at silence boundaries",
-                segment.end_timestamp_ms - segment.start_timestamp_ms,
-                segment.samples.len()
-            );
-
-            let sub_segments = split_segment_at_silence(segment, MAX_SEGMENT_SAMPLES);
-            debug!("Split into {} sub-segments", sub_segments.len());
-            processable_segments.extend(sub_segments);
-        } else {
-            processable_segments.push(segment.clone());
-        }
-    }
+    let processable_segments = prepare_speech_segments(
+        speech_segments, MAX_SEGMENT_SAMPLES, limits,
+        &|| RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst),
+    )?;
 
     let processable_count = processable_segments.len();
     info!("Processing {} segments (after splitting)", processable_count);
@@ -342,7 +339,7 @@ async fn run_retranscription<R: Runtime>(
     let mut total_confidence = 0.0f32;
     let mut transcribed_segment_count = 0usize;
 
-    for (i, segment) in processable_segments.iter().enumerate() {
+    for (i, segment) in processable_segments.into_iter().enumerate() {
         // Check for cancellation before each segment
         if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
             return Err(anyhow!("Retranscription cancelled"));
@@ -374,7 +371,7 @@ async fn run_retranscription<R: Runtime>(
         let (text, conf, timed_segments, timing_precision) = if use_parakeet {
             let engine = parakeet_engine.as_ref().unwrap();
             let result = engine
-                .transcribe_audio_with_timestamps(segment.samples.clone())
+                .transcribe_audio_with_timestamps(segment.samples)
                 .await
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
             let (timed, precision) =
@@ -388,7 +385,7 @@ async fn run_retranscription<R: Runtime>(
         } else {
             let engine = whisper_engine.as_ref().unwrap();
             let (text, conf, _, timed, precision) = engine
-                .transcribe_audio_with_verified_timing(segment.samples.clone(), language.clone())
+                .transcribe_audio_with_verified_timing(segment.samples, language.clone())
                 .await
                 .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
             (text, conf, timed, precision)

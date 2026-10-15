@@ -1,9 +1,10 @@
 // Audio file import module - allows importing external audio files as new meetings
 
 use crate::api::TranscriptSegment;
-use crate::audio::decoder::{decode_audio_file, decode_audio_file_with_progress};
+use crate::audio::decoder::{decode_audio_file, decode_audio_file_controlled};
 use crate::audio::transcription::{provider::offset_timed_segments, TimingPrecision};
-use crate::audio::vad::get_speech_chunks_with_progress;
+use crate::audio::vad::get_speech_chunks_with_limits;
+use super::batch_limits::{BatchAudioLease, BatchAudioLimits};
 use crate::config::{DEFAULT_WHISPER_MODEL, DEFAULT_PARAKEET_MODEL};
 use crate::parakeet_engine::ParakeetEngine;
 use crate::state::AppState;
@@ -19,7 +20,7 @@ use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 use super::audio_processing::create_meeting_folder;
-use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json, TranscriptInput};
+use super::common::{create_transcript_segments, prepare_speech_segments, write_transcripts_json, TranscriptInput};
 use super::constants::AUDIO_EXTENSIONS;
 use super::recording_preferences::get_default_recordings_folder;
 
@@ -59,7 +60,7 @@ impl Drop for ImportGuard {
 /// natural sentence/topic pause (500ms-2s)
 const VAD_REDEMPTION_TIME_MS: u32 = 2000;
 
-/// Maximum file size: 20GB (prevents OOM and excessive processing time)
+/// Source-file disk limit. Decoded PCM has a separate working-memory budget.
 const MAX_FILE_SIZE_BYTES: u64 = 20 * 1024 * 1024 * 1024; // 20GB
 
 /// Information about a selected audio file
@@ -172,11 +173,13 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
             duration
         }
         Err(e) => {
-            // Fallback to full decode if metadata unavailable
+            if e.downcast_ref::<super::batch_limits::AudioBudgetExceeded>().is_some() { return Err(e); }
+            // Fallback to bounded decode if metadata unavailable
             warn!(
                 "Metadata extraction failed: {}, falling back to full decode",
                 e
             );
+            let _lease = BatchAudioLease::try_acquire()?;
             let decoded = decode_audio_file(path)?;
             decoded.duration_seconds
         }
@@ -242,6 +245,10 @@ fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
         .n_frames
         .ok_or_else(|| anyhow!("Frame count not available in metadata"))?;
 
+    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
+    let samples = usize::try_from(n_frames).ok().and_then(|n| n.checked_mul(channels))
+        .ok_or(super::batch_limits::AudioBudgetExceeded)?;
+    BatchAudioLimits::default().check_source(samples, sample_rate, u16::try_from(channels)?)?;
     let duration_seconds = n_frames as f64 / sample_rate as f64;
 
     debug!(
@@ -264,22 +271,28 @@ pub async fn start_import<R: Runtime>(
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = ImportGuard::acquire().map_err(|e| anyhow!(e))?;
 
-    // Reset cancellation flag
-    IMPORT_CANCELLED.store(false, Ordering::SeqCst);
-
     let use_parakeet = provider.as_deref() == Some("parakeet");
-    let result = run_import(
-        app.clone(),
-        source_path,
-        title,
-        language,
-        model,
-        provider,
-    )
-    .await;
+    let result = async {
+        let batch_lease = BatchAudioLease::try_acquire()?;
 
-    // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch(use_parakeet).await;
+        // Reset cancellation flag
+        IMPORT_CANCELLED.store(false, Ordering::SeqCst);
+
+        let result = run_import(
+            app.clone(),
+            source_path,
+            title,
+            language,
+            model,
+            provider,
+            &batch_lease,
+        )
+        .await;
+
+        // Unload the engine after the batch job (success, failure, or cancellation)
+        super::common::unload_engine_after_batch(use_parakeet).await;
+        result
+    }.await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -317,9 +330,12 @@ async fn run_import<R: Runtime>(
     language: Option<String>,
     model: Option<String>,
     provider: Option<String>,
+    batch_lease: &BatchAudioLease,
 ) -> Result<ImportResult> {
+    let limits = BatchAudioLimits::default();
     let source = PathBuf::from(&source_path);
 
+    super::batch_limits::check_source_file(&source)?;
     // Validate source file
     if !source.exists() {
         return Err(anyhow!("Source file not found: {}", source.display()));
@@ -358,9 +374,9 @@ async fn run_import<R: Runtime>(
 
     let src = source.clone();
     let dst = dest_path.clone();
-    tokio::task::spawn_blocking(move || std::fs::copy(&src, &dst))
+    batch_lease.spawn_blocking(move || std::fs::copy(&src, &dst))
         .await
-        .map_err(|e| anyhow!("Copy task join error: {}", e))?
+        .map_err(|e| anyhow!("Copy task join error: {}", e))?.0
         .map_err(|e| anyhow!("Failed to copy audio file: {}", e))?;
 
     info!("Copied audio to: {}", dest_path.display());
@@ -383,11 +399,11 @@ async fn run_import<R: Runtime>(
     });
 
     let path_for_decode = dest_path.clone();
-    let decoded = tokio::task::spawn_blocking(move || {
-        decode_audio_file_with_progress(&path_for_decode, Some(decode_progress))
+    let decoded = batch_lease.spawn_blocking(move || {
+        decode_audio_file_controlled(&path_for_decode, Some(decode_progress), limits, &|| IMPORT_CANCELLED.load(Ordering::SeqCst))
     })
     .await
-    .map_err(|e| anyhow!("Decode task join error: {}", e))??;
+    .map_err(|e| anyhow!("Decode task join error: {}", e))?.0?;
     let duration_seconds = decoded.duration_seconds;
 
     info!(
@@ -411,11 +427,11 @@ async fn run_import<R: Runtime>(
         emit_progress(&app_for_resample, "resampling", overall_progress, msg);
     });
 
-    let audio_samples = tokio::task::spawn_blocking(move || {
-        decoded.to_whisper_format_with_progress(Some(resample_progress))
+    let audio_samples = batch_lease.spawn_blocking(move || {
+        decoded.into_whisper_format_controlled(Some(resample_progress), limits, &|| IMPORT_CANCELLED.load(Ordering::SeqCst))
     })
     .await
-    .map_err(|e| anyhow!("Resample task join error: {}", e))?;
+    .map_err(|e| anyhow!("Resample task join error: {}", e))?.0?;
     info!(
         "Converted to 16kHz mono format: {} samples",
         audio_samples.len()
@@ -432,10 +448,10 @@ async fn run_import<R: Runtime>(
     // Use VAD to find speech segments
     let app_for_vad = app.clone();
 
-    let speech_segments = tokio::task::spawn_blocking(move || {
-        get_speech_chunks_with_progress(
-            &audio_samples,
-            VAD_REDEMPTION_TIME_MS,
+    let speech_segments = batch_lease.spawn_blocking(move || {
+        get_speech_chunks_with_limits(
+            &audio_samples, audio_samples.capacity(),
+            VAD_REDEMPTION_TIME_MS, limits, &|| IMPORT_CANCELLED.load(Ordering::SeqCst),
             |vad_progress, segments_found| {
                 let overall_progress = 25 + (vad_progress as f32 * 0.05) as u32;
                 emit_progress(
@@ -452,7 +468,7 @@ async fn run_import<R: Runtime>(
         )
     })
     .await
-    .map_err(|e| anyhow!("VAD task panicked: {}", e))?
+    .map_err(|e| anyhow!("VAD task panicked: {}", e))?.0
     .map_err(|e| anyhow!("VAD processing failed: {}", e))?;
 
     let total_segments = speech_segments.len();
@@ -526,22 +542,10 @@ async fn run_import<R: Runtime>(
     // for the lowest-energy window near the target split point and cut there.
     const MAX_SEGMENT_SAMPLES: usize = 25 * 16000; // 25 seconds at 16kHz
 
-    let mut processable_segments: Vec<crate::audio::vad::SpeechSegment> = Vec::new();
-    for segment in &speech_segments {
-        if segment.samples.len() > MAX_SEGMENT_SAMPLES {
-            debug!(
-                "Splitting large segment ({:.0}ms, {} samples) at silence boundaries",
-                segment.end_timestamp_ms - segment.start_timestamp_ms,
-                segment.samples.len()
-            );
-
-            let sub_segments = split_segment_at_silence(segment, MAX_SEGMENT_SAMPLES);
-            debug!("Split into {} sub-segments", sub_segments.len());
-            processable_segments.extend(sub_segments);
-        } else {
-            processable_segments.push(segment.clone());
-        }
-    }
+    let processable_segments = prepare_speech_segments(
+        speech_segments, MAX_SEGMENT_SAMPLES, limits,
+        &|| IMPORT_CANCELLED.load(Ordering::SeqCst),
+    )?;
 
     let processable_count = processable_segments.len();
     info!("Processing {} segments (after splitting)", processable_count);
@@ -551,7 +555,7 @@ async fn run_import<R: Runtime>(
     let mut total_confidence = 0.0f32;
     let mut transcribed_segment_count = 0usize;
 
-    for (i, segment) in processable_segments.iter().enumerate() {
+    for (i, segment) in processable_segments.into_iter().enumerate() {
         if IMPORT_CANCELLED.load(Ordering::SeqCst) {
             let _ = std::fs::remove_dir_all(&meeting_folder);
             return Err(anyhow!("Import cancelled"));
@@ -585,7 +589,7 @@ async fn run_import<R: Runtime>(
         let (text, conf, timed_segments, timing_precision) = if use_parakeet {
             let engine = parakeet_engine.as_ref().unwrap();
             let result = engine
-                .transcribe_audio_with_timestamps(segment.samples.clone())
+                .transcribe_audio_with_timestamps(segment.samples)
                 .await
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
             let (timed, precision) =
@@ -599,7 +603,7 @@ async fn run_import<R: Runtime>(
         } else {
             let engine = whisper_engine.as_ref().unwrap();
             let (text, conf, _, timed, precision) = engine
-                .transcribe_audio_with_verified_timing(segment.samples.clone(), language.clone())
+                .transcribe_audio_with_verified_timing(segment.samples, language.clone())
                 .await
                 .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
             (text, conf, timed, precision)
@@ -980,7 +984,8 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
             let path_str = path.to_string();
             info!("User selected: {}", path_str);
 
-            match validate_audio_file(Path::new(&path_str)) {
+            match tokio::task::spawn_blocking(move || validate_audio_file(Path::new(&path_str)))
+                .await.map_err(|e| format!("Audio validation task failed: {e}"))? {
                 Ok(info) => Ok(Some(info)),
                 Err(e) => {
                     error!("Validation failed: {}", e);
@@ -999,7 +1004,9 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
 #[tauri::command]
 pub async fn validate_audio_file_command(path: String) -> Result<AudioFileInfo, String> {
     info!("Validating audio file: {}", path);
-    validate_audio_file(Path::new(&path)).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || validate_audio_file(Path::new(&path)))
+        .await.map_err(|e| format!("Audio validation task failed: {e}"))?
+        .map_err(|e| e.to_string())
 }
 
 /// Start importing an audio file (Beta gated using configContext.betaFeatures)
@@ -1049,6 +1056,7 @@ pub async fn is_import_in_progress_command() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::audio::common::split_segment_at_silence;
     use super::*;
 
     #[test]
@@ -1301,7 +1309,8 @@ mod tests {
 
         // Step 2: Resample to 16kHz mono
         println!("Resampling to 16kHz mono...");
-        let samples = decoded.to_whisper_format();
+        let duration_seconds = decoded.duration_seconds;
+        let samples = decoded.into_whisper_format().unwrap();
         println!("Resampled: {} samples ({:.2}s at 16kHz)", samples.len(), samples.len() as f64 / 16000.0);
 
         // Step 3: Run VAD with both redemption times and compare
@@ -1334,8 +1343,8 @@ mod tests {
                     "Stats: avg={:.0}ms, min={:.0}ms, max={:.0}ms, total_speech={:.1}s/{:.1}s ({:.0}%)",
                     avg, min, max,
                     total_speech / 1000.0,
-                    decoded.duration_seconds,
-                    (total_speech / 1000.0 / decoded.duration_seconds) * 100.0
+                    duration_seconds,
+                    (total_speech / 1000.0 / duration_seconds) * 100.0
                 );
 
                 // Segments over 25s that would be split
