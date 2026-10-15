@@ -11,6 +11,157 @@ struct TestVault {
     fail: bool,
     read_fail: bool,
 }
+
+#[tokio::test]
+async fn stop_deadline_only_ends_http_wait_and_retries_replay_final_result() {
+    use super::server::{guard, stop_recording_with_action, GatewayState};
+    use super::types::{ClientBrief, Discovery};
+    use axum::{
+        extract::{Extension, Path, State},
+        middleware,
+        routing::post,
+        Router,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    let pool = pool().await;
+    let clients = ClientService::new(pool.clone(), Arc::new(TestVault::default()));
+    let token = clients
+        .create(
+            "stop regression",
+            vec![Scope::Record],
+            chrono::Utc::now() + chrono::Duration::days(1),
+        )
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let base_url = format!("http://{}/api/internal/v1", listener.local_addr().unwrap());
+    let enabled = Arc::new(AtomicBool::new(true));
+    let state = GatewayState {
+        pool: pool.clone(),
+        clients,
+        discovery: Discovery {
+            pid: std::process::id(),
+            instance_id: "stop-regression".into(),
+            base_url: base_url.clone(),
+            protocol_version: 1,
+        },
+        enabled: enabled.clone(),
+        rates: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        reads: Arc::new(tokio::sync::Semaphore::new(4)),
+        app: None,
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let finish = Arc::new(tokio::sync::Notify::new());
+    let action_calls = calls.clone();
+    let action_started = started.clone();
+    let action_finish = finish.clone();
+    let router = Router::new()
+        .route(
+            "/api/internal/v1/recordings/{id}/stop",
+            post(
+                move |State(state): State<GatewayState>,
+                      Extension(client): Extension<ClientBrief>,
+                      Path(id): Path<String>,
+                      headers: axum::http::HeaderMap| {
+                    let calls = action_calls.clone();
+                    let started = action_started.clone();
+                    let finish = action_finish.clone();
+                    async move {
+                        stop_recording_with_action(
+                            state.pool,
+                            client.id,
+                            id,
+                            headers,
+                            move |session_id| async move {
+                                assert_eq!(session_id, "session-one");
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                started.notify_one();
+                                finish.notified().await;
+                                Ok(())
+                            },
+                        )
+                        .await
+                    }
+                },
+            ),
+        )
+        .layer(middleware::from_fn_with_state(state.clone(), guard))
+        .with_state(state);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .no_proxy()
+        .build()
+        .unwrap();
+    let url = format!("{base_url}/recordings/session-one/stop");
+    let request = || {
+        http.post(&url)
+            .bearer_auth(&token.token)
+            .header("Idempotency-Key", "http-stop")
+    };
+    let before = Instant::now();
+    let first_request = tokio::spawn(request().send());
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("stop action must start");
+    let first = first_request.await.unwrap().unwrap();
+    assert_eq!(first.status(), 503);
+    let first: serde_json::Value = first.json().await.unwrap();
+    assert_eq!(first["error"]["code"], "BUSY");
+    assert_eq!(first["error"]["message"], "Request deadline exceeded");
+    assert!(
+        before.elapsed() >= Duration::from_secs(19),
+        "must exercise the production 20-second deadline"
+    );
+
+    let pending = request().send().await.unwrap();
+    assert_eq!(pending.status(), 503);
+    let pending: serde_json::Value = pending.json().await.unwrap();
+    assert_eq!(pending["error"]["code"], "BUSY");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Disabling new requests must not cancel an already accepted safe stop.
+    enabled.store(false, Ordering::SeqCst);
+    let disabled: serde_json::Value = request().send().await.unwrap().json().await.unwrap();
+    assert_eq!(disabled["error"]["code"], "NOT_READY");
+    finish.notify_one();
+    let saved = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let result: Option<String> = sqlx::query_scalar("SELECT response_json FROM automation_requests WHERE client_id=? AND key='http-stop'")
+                .bind(&token.client.id).fetch_one(&pool).await.unwrap();
+            if let Some(result) = result { break serde_json::from_str::<serde_json::Value>(&result).unwrap(); }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.expect("stop must finish and persist after HTTP timeout and gateway disable");
+    assert_eq!(
+        saved,
+        serde_json::json!({"session_id":"session-one","status":"stopped"})
+    );
+    enabled.store(true, Ordering::SeqCst);
+    let replay = request().send().await.unwrap();
+    assert_eq!(replay.status(), 200);
+    assert_eq!(replay.json::<serde_json::Value>().await.unwrap(), saved);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let _ = shutdown_tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 impl Vault for TestVault {
     fn put(&self, id: &str, value: &str) -> Result<(), String> {
         if self.fail {

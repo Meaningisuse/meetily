@@ -2,6 +2,20 @@
 
 执行顺序 P0 → P3 → P4；P1/P2后置。区分代码/测试通过、本机真实运行、实际会议与业务效果验收。当前未使用用户的会议音频或收费 provider。
 
+## 2026-10-15 API 停录请求取消安全
+
+修复范围：仅原生 HTTP 停录的请求生命周期。`idempotency::run_detached` 在首次数据库等待前建立独立 Tokio task，完整持有幂等登记、原生停录 action 与成功结果写入；20秒 HTTP deadline 和调用方取消只结束等待。不同 key 的停录 action 争用录音操作锁时立即返回 `BUSY`，不长期排队；获得锁后仍核对活动 session。响应格式、scope 和幂等重放合同保持。
+
+验证证据：
+
+- 红测：旧内联执行路径下，取消 waiter 后5秒内未保存结果，`detached_stop_finishes_and_replays_after_request_is_cancelled` 失败；Cargo退出101，0通过/1失败。修复后同一回归通过。
+- 定向检查：`cargo test --locked -p meetily --lib automation -- --nocapture` 退出0，29通过/0失败。包含真实 loopback HTTP、生产鉴权及20秒 deadline；首请求返回原有 `BUSY` 后 action 仍完成并落库，同 key 重放得到相同成功结果且只执行一次。在途同 key 为 `BUSY`，不同请求体为 `CONFLICT`。
+- 完整原生检查：使用仓库内CMake 3.31.6并为当前进程指定Xcode，`scripts/check-enhancement.sh --native` 退出0；Cargo metadata、helper准备完成，Rust库测试344通过/0失败/6忽略。忽略的模型测试未启用；已有编译warning仍在，不计作失败。
+- 故障边界：取消 waiter 后正常业务错误仍清理登记；panic返回受控错误并保留未决 key；使用 SQLite trigger 注入成功结果写入失败，确认同 key 重试不重复副作用；原生录音锁争用、旧 session 防护和错误码映射有回归。
+- 入口禁用：HTTP测试在超时后关闭 `enabled`，确认新请求被拒绝、已接收 action 仍落库。这不是完整 `AutomationServer::stop()` 或应用退出验收。
+
+以上测试使用合成停录 action、测试数据库和内存 Vault，没有采集设备音频、加载模型或操作真实 Keychain。它们验证请求取消安全和幂等行为，不代表真实转写积压、文件保存与原生停录终态已完成现场验收；应用退出、runtime shutdown 和原生停录 panic 的业务恢复仍沿用既有边界。此修复不改变P3真实助手连接或P4说话人效果门禁。
+
 ## P0 / F4 工程验证
 
 - 数据库恢复：异常打开前保留 DB/WAL/SHM；SHA256清单、私有目录、fsync与发布后读回。备份失败不会继续破坏原始文件。正常升级用 SQLite online snapshot，测试包含未checkpoint的已提交WAL和迁移前旧数据。没有自动删除原WAL或声称能修复损坏的数据库。依据：[SQLite VACUUM INTO](https://www.sqlite.org/lang_vacuum.html)。

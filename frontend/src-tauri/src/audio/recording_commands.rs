@@ -47,13 +47,25 @@ pub fn active_recording_session_id() -> Option<String> {
 
 #[cfg(test)]
 mod automation_session_tests {
-    use super::stop_matches_session;
+    use super::{
+        acquire_automation_stop_operation, stop_matches_session, RECORDING_OPERATION_LOCK,
+    };
 
     #[test]
     fn stale_session_id_cannot_stop_a_new_recording() {
         assert!(stop_matches_session(Some("session-a"), "session-a"));
         assert!(!stop_matches_session(Some("session-b"), "session-a"));
         assert!(!stop_matches_session(None, "session-a"));
+    }
+
+    #[tokio::test]
+    async fn automation_stop_rejects_lock_contention_without_queueing() {
+        let operation = RECORDING_OPERATION_LOCK.lock().await;
+        let error = acquire_automation_stop_operation("stale-test-session").unwrap_err();
+        assert_eq!(error, "BUSY: Another recording operation is in progress");
+        drop(operation);
+        let error = acquire_automation_stop_operation("stale-test-session").unwrap_err();
+        assert_eq!(error, "CONFLICT: Recording session is no longer active");
     }
 }
 
@@ -94,12 +106,7 @@ pub async fn automation_stop_recording<R: Runtime>(
     app: AppHandle<R>,
     session_id: &str,
 ) -> Result<(), String> {
-    let _operation = RECORDING_OPERATION_LOCK.lock().await;
-    let active = active_recording_session_id();
-    if !stop_matches_session(active.as_deref(), session_id) || !IS_RECORDING.load(Ordering::SeqCst)
-    {
-        return Err("CONFLICT: Recording session is no longer active".into());
-    }
+    let _operation = acquire_automation_stop_operation(session_id)?;
     stop_recording_inner(
         app,
         RecordingArgs {
@@ -107,6 +114,22 @@ pub async fn automation_stop_recording<R: Runtime>(
         },
     )
     .await
+}
+
+fn acquire_automation_stop_operation(
+    session_id: &str,
+) -> Result<tokio::sync::MutexGuard<'static, ()>, String> {
+    // Detached stop requests must not build a long-lived queue behind another
+    // start/stop. A busy request has no side effects and can be retried safely.
+    let operation = RECORDING_OPERATION_LOCK
+        .try_lock()
+        .map_err(|_| "BUSY: Another recording operation is in progress".to_string())?;
+    let active = active_recording_session_id();
+    if !stop_matches_session(active.as_deref(), session_id) || !IS_RECORDING.load(Ordering::SeqCst)
+    {
+        return Err("CONFLICT: Recording session is no longer active".into());
+    }
+    Ok(operation)
 }
 
 /// True for the whole `stop_recording` tail (manager taken -> `recording-stopped`

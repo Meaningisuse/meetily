@@ -66,6 +66,14 @@ scripts/meetily-chatgpt-tunnel.sh
 
 启动器会在当前终端静默提示输入 OpenAI runtime API key；也可由调用进程安全注入 `CONTROL_PLANE_API_KEY`。key 不放在命令参数或配置文件中。脚本以 `--mcp.command` 启动已构建的 Meetily MCP stdio 服务，客户端再从 macOS Keychain 读取对应的 Meetily read token。Meetily 必须保持运行并启用 Local automation。每个 tunnel ID 同时只能运行一个使用 stdio binding 的 `tunnel-client` 实例；结束进程即可断开。自动化测试使用假的 tunnel-client 校验参数与 key 隔离，不能代替真实 Platform/ChatGPT 连通验收。[Secure MCP Tunnel 操作说明](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) · [tunnel-client 官方说明](https://github.com/openai/tunnel-client)
 
+## 原生 HTTP 停录与超时重试
+
+持有 `record` 权限的客户端可调用 `POST /api/internal/v1/recordings/{session_id}/stop`，并提供 `Idempotency-Key`。成功响应保持 `{"session_id":"...","status":"stopped"}`。本节描述原生 HTTP API；上述五个只读 MCP 工具不提供录音控制。
+
+网关仍有20秒请求期限。停录一旦被独立任务接收，幂等登记、原生停录收尾和成功结果落库由该任务持续执行；HTTP超时、调用方取消等待或关闭自动化入口不会取消这项已接收操作。超时响应为 `503 / BUSY / Request deadline exceeded`，它不代表停录已失败或完成。客户端应保留原 session ID 和原 key，稍后以相同请求重试：处理中仍返回 `BUSY`，完成后返回已持久化的同一成功结果，不重复停录。
+
+其他录音开始/停止操作占用录音锁时，新停录 action 立即返回 `BUSY`，不会长期排队等待。获得锁后仍核对 session，旧 session 返回 `CONFLICT`。普通业务错误按既有合同清理幂等登记；如果成功结果落库失败或原生 action panic，则保留未决登记以避免重复副作用，客户端应检查应用状态与恢复材料，不应自动更换 key 重发。独立任务只在当前应用进程及运行时存活期间继续执行，不提供应用退出或崩溃后的完成保证。
+
 ## Webhook 接收
 
 在 Meetily 的“设置 → Local automation”中添加目标。地址必须为 HTTPS，并输入与URL主机完全匹配的批准项。Meetily 首次解析时校验并固定解析IP；每次投递会重新解析并拒绝未批准的新IP，不使用系统HTTP代理，也不跟随重定向。只有确实需要内网接收器时，才同时录入目标主机和精确IP。

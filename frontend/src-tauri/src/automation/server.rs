@@ -554,28 +554,71 @@ async fn stop_recording(
             "Desktop state is unavailable.",
         ))
     })?;
+    stop_recording_with_action(
+        state.pool,
+        client.id,
+        id,
+        headers,
+        move |session_id| async move {
+            crate::audio::recording_commands::automation_stop_recording(app, &session_id).await
+        },
+    )
+    .await
+}
+
+// Keep the HTTP orchestration testable without starting capture hardware. Both
+// the desktop action and synthetic slow-action tests use this same boundary.
+pub(super) async fn stop_recording_with_action<F, Fut>(
+    pool: SqlitePool,
+    client_id: String,
+    id: String,
+    headers: axum::http::HeaderMap,
+    stop: F,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    F: FnOnce(String) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+{
     let key = idempotency_key(&headers)?;
     let payload = serde_json::json!({"session_id":id,"operation":"stop"});
     let response =
-        super::idempotency::run(&state.pool, &client.id, &key, &payload, || async move {
-            crate::audio::recording_commands::automation_stop_recording(app, &id)
-                .await
-                .map_err(|e| {
-                    if e.starts_with("CONFLICT:") {
-                        EnhancementError::new("CONFLICT", e.trim_start_matches("CONFLICT: "))
-                    } else {
-                        EnhancementError::new(
-                            "IO_ERROR",
-                            "Recording could not be stopped or saved.",
-                        )
-                    }
-                })?;
+        super::idempotency::run_detached(&pool, &client_id, &key, &payload, move || async move {
+            stop(id.clone()).await.map_err(recording_stop_error)?;
             Ok(serde_json::json!({"session_id":id,"status":"stopped"}))
         })
         .await?;
     Ok(Json(response))
 }
-async fn guard(State(state): State<GatewayState>, mut request: Request, next: Next) -> Response {
+
+fn recording_stop_error(error: String) -> EnhancementError {
+    for code in ["CONFLICT", "BUSY"] {
+        if let Some(message) = error.strip_prefix(&format!("{code}:")) {
+            return EnhancementError::new(code, message.trim_start());
+        }
+    }
+    EnhancementError::new("IO_ERROR", "Recording could not be stopped or saved.")
+}
+
+#[cfg(test)]
+mod stop_error_tests {
+    #[test]
+    fn preserves_retryable_and_stale_session_errors_without_leaking_native_errors() {
+        for code in ["BUSY", "CONFLICT"] {
+            let error = super::recording_stop_error(format!("{code}: Recording operation"));
+            assert_eq!(error.code, code);
+            assert_eq!(error.message, "Recording operation");
+        }
+        let error = super::recording_stop_error("private filesystem diagnostic".into());
+        assert_eq!(error.code, "IO_ERROR");
+        assert!(!error.message.contains("private filesystem diagnostic"));
+    }
+}
+
+pub(super) async fn guard(
+    State(state): State<GatewayState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
     if !state.enabled.load(Ordering::SeqCst) {
         return error("NOT_READY", "Automation is disabled");
     }
