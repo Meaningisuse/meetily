@@ -1,7 +1,7 @@
 "use client";
 
 import { Transcript, TranscriptSegmentData } from '@/types';
-import { TranscriptView } from '@/components/TranscriptView';
+import { transcriptsToSegments } from '@/lib/transcript-timing';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -84,13 +84,7 @@ export function TranscriptPanel({
       return segments;
     }
     // Convert transcripts to segments for virtualization
-    return transcripts.map(t => ({
-      id: t.id,
-      timestamp: t.audio_start_time ?? 0,
-      endTime: t.audio_end_time,
-      text: t.text,
-      confidence: t.confidence,
-    }));
+    return transcriptsToSegments(transcripts);
   }, [transcripts, usePagination, segments]);
 
   return (

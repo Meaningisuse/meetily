@@ -58,6 +58,22 @@ async function load(meetingId: string, hasMore = false) {
 }
 
 describe('paginated transcript request ownership', () => {
+  test('display segments retain unknown starts, actual zero and timing precision', async () => {
+    await show('timing');
+    await resolve(request('metadata', 'timing'), metadata('timing'));
+    await resolve(request('transcripts', 'timing'), {
+      transcripts: [
+        { id: 'missing', text: 'No audio bounds', timestamp: '14:30:05' },
+        { id: 'null', text: 'Legacy null time', timestamp: '00:00', audio_start_time: null },
+        { id: 'zero', text: 'Recording start', timestamp: '14:30:05', audio_start_time: 0, audio_end_time: 1, timing_precision: 'approximate' },
+        { id: 'unavailable', text: 'Explicitly unavailable', timestamp: '00:00', audio_start_time: 12, timing_precision: 'unavailable' },
+      ], total_count: 4, has_more: false,
+    });
+    expect(state.segments.map(segment => segment.timestamp)).toEqual([undefined, null, 0, 12]);
+    expect(state.segments.map(segment => segment.timingPrecision)).toEqual([undefined, undefined, 'approximate', 'unavailable']);
+    expect(state.segments[2].endTime).toBe(1);
+  });
+
   test('ignores late A metadata after B finishes and does not start A transcripts', async () => {
     await show('A');
     const stale = request('metadata', 'A');

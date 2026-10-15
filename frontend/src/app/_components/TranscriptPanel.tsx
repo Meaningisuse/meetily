@@ -10,6 +10,7 @@ import { usePermissionCheck } from '@/hooks/usePermissionCheck';
 import { ModalType } from '@/hooks/useModalState';
 import { useIsLinux } from '@/hooks/usePlatform';
 import { useMemo } from 'react';
+import { transcriptsToSegments } from '@/lib/transcript-timing';
 
 /**
  * TranscriptPanel Component
@@ -39,13 +40,7 @@ export function TranscriptPanel({
 
   // Convert transcripts to segments for virtualized view
   const segments = useMemo(() =>
-    transcripts.map(t => ({
-      id: t.id,
-      timestamp: t.audio_start_time ?? 0,
-      endTime: t.audio_end_time,
-      text: t.text,
-      confidence: t.confidence,
-    })),
+    transcriptsToSegments(transcripts),
     [transcripts]
   );
 

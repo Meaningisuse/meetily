@@ -155,8 +155,8 @@ export interface PaginatedTranscriptsResponse {
 // Transcript segment data for virtualized display
 export interface TranscriptSegmentData {
   id: string;
-  timestamp: number; // audio_start_time in seconds
-  endTime?: number; // audio_end_time in seconds
+  timestamp?: number | null; // Recording-relative seconds; missing/null means unknown
+  endTime?: number | null; // audio_end_time in seconds
   text: string;
   confidence?: number;
   timingPrecision?: TimingPrecision;

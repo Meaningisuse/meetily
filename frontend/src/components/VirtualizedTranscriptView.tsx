@@ -9,6 +9,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
+import { getTranscriptTiming } from "@/lib/transcript-timing";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -41,17 +42,6 @@ export interface VirtualizedTranscriptViewProps {
 // Threshold for enabling virtualization (below this, use simple rendering)
 const VIRTUALIZATION_THRESHOLD = 10;
 
-// Helper function to format seconds as recording-relative time [MM:SS]
-function formatRecordingTime(seconds: number | undefined): string {
-    if (seconds === undefined) return '[--:--]';
-
-    const totalSeconds = Math.floor(seconds);
-    const minutes = Math.floor(totalSeconds / 60);
-    const secs = totalSeconds % 60;
-
-    return `[${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}]`;
-}
-
 // Helper function to remove filler words and repetitions
 function cleanStopWords(text: string): string {
     const stopWords = ['uh', 'um', 'er', 'ah', 'hmm', 'hm', 'eh', 'oh'];
@@ -69,6 +59,8 @@ function cleanStopWords(text: string): string {
 const TranscriptSegment = memo(function TranscriptSegment({
     id,
     timestamp,
+    endTime,
+    timingPrecision,
     text,
     confidence,
     isStreaming,
@@ -76,29 +68,34 @@ const TranscriptSegment = memo(function TranscriptSegment({
     onSeekTo,
 }: {
     id: string;
-    timestamp: number;
+    timestamp?: number | null;
+    endTime?: number | null;
+    timingPrecision?: TranscriptSegmentData["timingPrecision"];
     text: string;
     confidence?: number;
     isStreaming: boolean;
     showConfidence: boolean;
     onSeekTo?: (seconds: number) => void;
 }) {
+    const timing = getTranscriptTiming({ timestamp, endTime, timingPrecision });
+    const seekSeconds = timing.seekSeconds;
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
 
     return (
         <div id={`segment-${id}`} className="mb-3">
             <div className="flex items-start gap-2">
                 <Tooltip>
-                    <TooltipTrigger>
-                        {onSeekTo ? (
-                            <button type="button" onClick={() => onSeekTo(timestamp)} aria-label={`Play from ${formatRecordingTime(timestamp)}`} className="text-xs text-blue-600 hover:text-blue-800 underline underline-offset-2 mt-1 flex-shrink-0 min-w-[50px] text-left">
-                                {formatRecordingTime(timestamp)}
+                    <TooltipTrigger asChild>
+                        {onSeekTo && seekSeconds !== undefined ? (
+                            <button type="button" onClick={() => onSeekTo(seekSeconds)} aria-label={timing.playLabel} className="text-xs text-blue-600 hover:text-blue-800 underline underline-offset-2 mt-1 flex-shrink-0 min-w-[50px] text-left whitespace-nowrap">
+                                {timing.label}
                             </button>
                         ) : (
-                            <span className="text-xs text-gray-400 mt-1 flex-shrink-0 min-w-[50px]">{formatRecordingTime(timestamp)}</span>
+                            <span aria-label={timing.description} className="text-xs text-gray-400 mt-1 flex-shrink-0 min-w-[50px] whitespace-nowrap">{timing.label}</span>
                         )}
                     </TooltipTrigger>
                     <TooltipContent>
+                        <p>{timing.description}</p>
                         {confidence !== undefined && showConfidence && (
                             <ConfidenceIndicator confidence={confidence} showIndicator={showConfidence} />
                         )}
@@ -301,6 +298,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                     <TranscriptSegment
                                         id={segment.id}
                                         timestamp={segment.timestamp}
+                                        endTime={segment.endTime}
+                                        timingPrecision={segment.timingPrecision}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         isStreaming={isStreaming}
@@ -358,6 +357,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                     <TranscriptSegment
                                         id={segment.id}
                                         timestamp={segment.timestamp}
+                                        endTime={segment.endTime}
+                                        timingPrecision={segment.timingPrecision}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         isStreaming={isStreaming}
