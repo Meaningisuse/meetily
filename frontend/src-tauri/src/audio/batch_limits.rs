@@ -1,6 +1,5 @@
+use crate::resources::{ResourceLease, ResourceScheduler};
 use anyhow::{anyhow, Result};
-use std::sync::{Arc, LazyLock};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub(crate) fn check_source_file(path: &std::path::Path) -> Result<()> {
     let metadata = std::fs::metadata(path)?;
@@ -139,25 +138,24 @@ pub(crate) fn reserve_samples(
     Ok(())
 }
 
-static BATCH_SLOT: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
-
 /// Shared across import, retranscription and metadata's decode fallback.
 /// Clones travel with blocking work/results so cancelling an async waiter does
 /// not release admission while the detached blocking task still owns PCM.
 #[derive(Clone, Debug)]
 pub(crate) struct BatchAudioLease {
-    _permit: Arc<OwnedSemaphorePermit>,
+    permit: ResourceLease,
 }
 
 impl BatchAudioLease {
-    pub fn try_acquire() -> Result<Self> {
-        Self::from_slot(BATCH_SLOT.clone())
+    pub fn try_acquire(scheduler: &ResourceScheduler) -> Result<Self> {
+        scheduler
+            .try_local()
+            .map(|permit| Self { permit })
+            .map_err(anyhow::Error::msg)
     }
-
-    fn from_slot(slot: Arc<Semaphore>) -> Result<Self> {
-        slot.try_acquire_owned().map(|p| Self { _permit: Arc::new(p) }).map_err(|_| {
-            anyhow!("Another audio import, retranscription or metadata decode is in progress. Retry after it finishes.")
-        })
+    pub fn operation(&self) -> crate::resources::ResourceOperation {
+        self.permit
+            .operation("Batch audio work was interrupted before cleanup")
     }
 
     pub fn spawn_blocking<T, F>(&self, work: F) -> tokio::task::JoinHandle<(T, Self)>
@@ -212,20 +210,20 @@ mod tests {
 
     #[tokio::test]
     async fn completed_unclaimed_pcm_result_keeps_its_lease() {
-        let slot = Arc::new(Semaphore::new(1));
-        let lease = BatchAudioLease::from_slot(slot.clone()).unwrap();
+        let slot = ResourceScheduler::new();
+        let lease = BatchAudioLease::try_acquire(&slot).unwrap();
         let work = lease.spawn_blocking(|| vec![0.0f32; 32]);
         drop(lease);
         let result = work.await.unwrap();
-        assert!(BatchAudioLease::from_slot(slot.clone()).is_err());
+        assert!(BatchAudioLease::try_acquire(&slot).is_err());
         drop(result);
-        assert!(BatchAudioLease::from_slot(slot).is_ok());
+        assert!(BatchAudioLease::try_acquire(&slot).is_ok());
     }
 
     #[tokio::test]
     async fn lease_remains_busy_after_async_waiter_is_cancelled() {
-        let slot = Arc::new(Semaphore::new(1));
-        let lease = BatchAudioLease::from_slot(slot.clone()).unwrap();
+        let slot = ResourceScheduler::new();
+        let lease = BatchAudioLease::try_acquire(&slot).unwrap();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();
         let work = lease.spawn_blocking(move || {
@@ -238,10 +236,10 @@ mod tests {
         drop(lease);
         waiter.abort();
         assert!(waiter.await.unwrap_err().is_cancelled());
-        assert!(BatchAudioLease::from_slot(slot.clone()).is_err());
+        assert!(BatchAudioLease::try_acquire(&slot).is_err());
         finish_tx.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while BatchAudioLease::from_slot(slot.clone()).is_err() {
+            while BatchAudioLease::try_acquire(&slot).is_err() {
                 tokio::task::yield_now().await;
             }
         })

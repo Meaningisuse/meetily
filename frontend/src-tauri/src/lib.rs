@@ -50,6 +50,7 @@ pub mod onboarding;
 pub mod openai;
 pub mod openrouter;
 pub mod parakeet_engine;
+pub mod resources;
 pub mod state;
 pub mod summary;
 pub mod tray;

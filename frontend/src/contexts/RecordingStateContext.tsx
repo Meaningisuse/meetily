@@ -153,11 +153,11 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         unsubscribers.push(unlistenStarted);
 
         // Recording starting (startup in progress)
-        const unlistenStarting = await recordingService.onRecordingStarting(() => {
+        const unlistenStarting = await recordingService.onRecordingStarting((payload) => {
           console.log('[RecordingStateContext] Recording starting event');
           setState(prev => prev.status === RecordingStatus.RECORDING
             ? prev
-            : { ...prev, status: RecordingStatus.STARTING, statusMessage: 'Starting recording...' });
+            : { ...prev, status: RecordingStatus.STARTING, statusMessage: payload?.message || 'Starting recording...' });
         });
         unsubscribers.push(unlistenStarting);
 

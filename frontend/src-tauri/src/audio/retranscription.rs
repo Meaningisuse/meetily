@@ -103,7 +103,9 @@ pub async fn start_retranscription<R: Runtime>(
 
     let use_parakeet = provider.as_deref() == Some("parakeet");
     let result = async {
-        let batch_lease = BatchAudioLease::try_acquire()?;
+        let resources = app.state::<crate::state::AppState>().jobs.resources();
+        let batch_lease = BatchAudioLease::try_acquire(&resources)?;
+        let mut resource_operation = batch_lease.operation();
 
         // Reset cancellation flag
         RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
@@ -112,8 +114,10 @@ pub async fn start_retranscription<R: Runtime>(
 
         // Unload the engine after the batch job (success, failure, or cancellation)
         super::common::unload_engine_after_batch(use_parakeet).await;
+        resource_operation.finish();
         result
-    }.await;
+    }
+    .await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);

@@ -516,11 +516,11 @@ pub async fn api_process_transcript<R: Runtime>(
     let job_id = job.id.clone();
     tauri::async_runtime::spawn(async move {
         match jobs.start(&job_id).await {
-            Ok(_lease) => {
+            Ok(lease) => {
                 // Await cooperative cleanup: the BuiltInAI sidecar must finish
                 // its shutdown before the heavy-job permit is released.
-                let result =
-                    std::panic::AssertUnwindSafe(SummaryService::process_transcript_background(
+                let result = std::panic::AssertUnwindSafe(async {
+                    let process = SummaryService::process_transcript_background(
                         app,
                         pool.clone(),
                         m_id.clone(),
@@ -533,9 +533,15 @@ pub async fn api_process_transcript<R: Runtime>(
                         final_template_id,
                         summary_language,
                         frozen,
-                    ))
-                    .catch_unwind()
-                    .await;
+                    );
+                    if let Some(local) = lease.local.clone() {
+                        crate::resources::LOCAL_WORK.scope(local, process).await
+                    } else {
+                        process.await
+                    }
+                })
+                .catch_unwind()
+                .await;
                 let unfinished = jobs.get(&job_id).await.is_ok_and(|j| j.status == "running");
                 if result.is_err() || unfinished {
                     let _ = jobs

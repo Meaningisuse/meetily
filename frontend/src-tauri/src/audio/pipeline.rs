@@ -1046,7 +1046,7 @@ impl AudioPipelineManager {
                 Ok(result) => result,
                 Err(e) => {
                     error!("Pipeline task failed: {}", e);
-                    Ok(())
+                    Err(anyhow::anyhow!("Pipeline task cleanup could not be confirmed: {e}"))
                 }
             }
         } else {
@@ -1110,6 +1110,13 @@ impl Default for AudioPipelineManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_pipeline_task_is_not_reported_as_confirmed_cleanup() {
+        let mut manager = AudioPipelineManager::new();
+        manager.pipeline_handle = Some(tokio::spawn(async { panic!("injected pipeline panic") }));
+        assert!(manager.force_flush_and_stop().await.is_err());
+    }
 
     #[test]
     fn test_live_vad_redemption_matches_pro_policy() {

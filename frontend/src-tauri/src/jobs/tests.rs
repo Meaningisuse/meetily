@@ -322,3 +322,112 @@ async fn saved_audio_recovery_uses_the_shared_heavy_slot() {
     assert!(jobs.try_audio_recovery_slot().is_err());
     drop(lease);
 }
+
+#[tokio::test]
+async fn local_summary_waits_for_recording_and_rechecks_source() {
+    let pool = pool().await;
+    seed(&pool, "recording-source").await;
+    let jobs = JobService::new(pool.clone());
+    let resources = jobs.resources();
+    let recording = resources
+        .recording_intent()
+        .unwrap()
+        .acquire()
+        .await
+        .unwrap();
+    assert!(jobs.try_audio_recovery_slot().is_err());
+    let job = jobs
+        .enqueue(
+            JobKind::Summary,
+            "recording-source",
+            0,
+            json!({"provider":"ollama"}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), jobs.start(&job.id))
+            .await
+            .is_err()
+    );
+    assert_eq!(jobs.get(&job.id).await.unwrap().status, "queued");
+    let mut conn = pool.acquire().await.unwrap();
+    crate::database::repositories::content_version::bump(
+        &mut conn,
+        "recording-source",
+        crate::database::repositories::content_version::ContentKind::Speaker,
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(recording);
+    assert_eq!(jobs.start(&job.id).await.err().unwrap().code, "CONFLICT");
+}
+
+#[tokio::test]
+async fn queued_local_summary_is_cancellable_during_recording() {
+    let pool = pool().await;
+    seed(&pool, "recording-cancel").await;
+    let jobs = JobService::new(pool);
+    let recording = jobs
+        .resources()
+        .recording_intent()
+        .unwrap()
+        .acquire()
+        .await
+        .unwrap();
+    let job = jobs
+        .enqueue(
+            JobKind::Summary,
+            "recording-cancel",
+            0,
+            json!({"provider":"custom-openai"}),
+        )
+        .await
+        .unwrap();
+    let starter = jobs.clone();
+    let id = job.id.clone();
+    let waiting = tokio::spawn(async move { starter.start(&id).await });
+    jobs.cancel(&job.id).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap()
+            .code,
+        "CANCELLED"
+    );
+    drop(recording);
+    assert!(jobs.resources().try_local().is_ok());
+}
+
+#[tokio::test]
+async fn fixed_cloud_summary_can_run_during_recording() {
+    let pool = pool().await;
+    seed(&pool, "recording-cloud").await;
+    let jobs = JobService::new(pool);
+    let recording = jobs
+        .resources()
+        .recording_intent()
+        .unwrap()
+        .acquire()
+        .await
+        .unwrap();
+    let job = jobs
+        .enqueue(
+            JobKind::Summary,
+            "recording-cloud",
+            0,
+            json!({"provider":"openai"}),
+        )
+        .await
+        .unwrap();
+    let summary = jobs.start(&job.id).await.unwrap();
+    assert!(summary.local.is_none());
+    assert!(jobs.resources().try_local().is_err());
+    drop(summary);
+    drop(recording);
+    assert!(jobs.resources().try_local().is_ok());
+}

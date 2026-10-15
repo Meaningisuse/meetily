@@ -27,6 +27,20 @@
 
 这是应用层分配规则及取消验证，没有实测整个应用RSS或长会议识别质量。120分钟16 kHz mono仅通过默认预算算术检查，不是两小时导入验收。重转写预算失败仍在旧转写替换事务之前返回，这一结论由控制流复核支持，没有新增真实旧库故障注入测试。完整默认上限、源格式对可接受长度的影响、FFmpeg有限超调及取消粒度见[音频批处理边界](BATCH_AUDIO_LIMITS.md)。
 
+## 2026-10-15 统一资源调度与录音优先
+
+AppState.jobs持有实例级ResourceScheduler，录音、本地摘要、导入、重转写、元数据解码回退和保存音频补转写共享准入。录音意图原子阻止新本地重任务；已有任务自然排空后才启动采集，等待上限15秒，超时撤销意图并返回BUSY。本地摘要保持queued，批处理和恢复即时拒绝；固定云服务摘要保留原串行队列但不占本地许可。两条录音入口均已接入，许可覆盖停止worker排空、引擎卸载和保存收尾。
+
+本地摘要取消后会排空当前HTTP响应再归还资源，完整响应与业务结果分别记录；参数／length／JSON／完整HTTP错误不误封禁。传输中断、任务abort、panic及未确认退出的helper保留uncertain。内置helper退出要求wait或kill后wait确认。录音stream／pipeline清理错误向上传播并继续保存材料；manager启动后的失败不能统一确认rollback，因此保守阻断，需确认本地工作已停止并重启。详见[调度政策与失败边界](RESOURCE_SCHEDULING.md)。
+
+- 红测：新增3项录音优先状态机回归在stub路径全部失败（0通过/3失败，Cargo退出101），完成实现后通过。另补pipeline handle注入panic的红测，0通过/1失败（退出101），确认底层JoinErr曾被吞为成功，修复后再次全量通过。
+- 最终原生检查：`scripts/check-enhancement.sh --native` 退出0；Rust共383项，377通过、0失败、6忽略，比本项前增加19项回归。使用仓库CMake3.31.6、进程级Xcode覆盖；helper构建及FFmpeg缓存校验成功。helper1条、build script1条、lib test11条warning未影响退出码。
+- 覆盖原子并发准入、录音等待防插队、超时／放弃等待、异常drop／panic、queued摘要取消与来源冲突、固定云摘要与录音许可并行、本地类别别名、batch阻塞工作及完成结果持有许可。合成HTTP验证Ollama／自定义服务取消后body仍阻塞时不放行、排空后放行、断连／abort保守阻断及业务错误正常释放。清理注入覆盖stream／pipeline失败和成功，真实pipeline handle panic回归确认JoinErr向上传播；合成子进程验证helper确认退出后才能释放资源。
+- 前端：现成Bun1.3.14执行`bun test tests`（frontend目录），59通过、0失败；`./node_modules/.bin/tsc --noEmit`退出0。等待提示使用recording-starting的message，自动化start保留BUSY错误类别。前端测试存在预期的模拟失败分支日志，不代表测试失败。
+- Astra只读方案与修复复核实际参与；Luna执行红测和最终验证，主代理完成实现及测试设计。首次全量编译发现2处String借用错误，修复后重跑通过；复核指出的清理错误吞没及摘要业务错误误封禁已修正后再次执行最终原生检查。
+
+验证使用独立调度器实例、测试数据库、合成HTTP及子进程，没有启动真实录音、加载真实模型、操作用户会议或真实Keychain。没有执行新.app打包／启动验收、真实设备rollback故障、长会议资源峰值或外部服务取消协议验收。调度约束本应用发起的任务，不保证整机资源独占；内置helper每次生成后退出可能增加分块摘要的模型重载时间。
+
 ## P0 / F4 工程验证
 
 - 数据库恢复：异常打开前保留 DB/WAL/SHM；SHA256清单、私有目录、fsync与发布后读回。备份失败不会继续破坏原始文件。正常升级用 SQLite online snapshot，测试包含未checkpoint的已提交WAL和迁移前旧数据。没有自动删除原WAL或声称能修复损坏的数据库。依据：[SQLite VACUUM INTO](https://www.sqlite.org/lang_vacuum.html)。

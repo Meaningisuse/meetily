@@ -121,7 +121,10 @@ pub fn cancel_import() {
 
 /// Validate an audio file and return its info using metadata-only approach
 /// Falls back to full decode if metadata is unavailable
-pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
+pub fn validate_audio_file(
+    path: &Path,
+    resources: &crate::resources::ResourceScheduler,
+) -> Result<AudioFileInfo> {
     // Check file exists
     if !path.exists() {
         return Err(anyhow!("File does not exist: {}", path.display()));
@@ -179,7 +182,7 @@ pub fn validate_audio_file(path: &Path) -> Result<AudioFileInfo> {
                 "Metadata extraction failed: {}, falling back to full decode",
                 e
             );
-            let _lease = BatchAudioLease::try_acquire()?;
+            let _lease = BatchAudioLease::try_acquire(resources)?;
             let decoded = decode_audio_file(path)?;
             decoded.duration_seconds
         }
@@ -273,7 +276,9 @@ pub async fn start_import<R: Runtime>(
 
     let use_parakeet = provider.as_deref() == Some("parakeet");
     let result = async {
-        let batch_lease = BatchAudioLease::try_acquire()?;
+        let resources = app.state::<crate::state::AppState>().jobs.resources();
+        let batch_lease = BatchAudioLease::try_acquire(&resources)?;
+        let mut resource_operation = batch_lease.operation();
 
         // Reset cancellation flag
         IMPORT_CANCELLED.store(false, Ordering::SeqCst);
@@ -291,8 +296,10 @@ pub async fn start_import<R: Runtime>(
 
         // Unload the engine after the batch job (success, failure, or cancellation)
         super::common::unload_engine_after_batch(use_parakeet).await;
+        resource_operation.finish();
         result
-    }.await;
+    }
+    .await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -984,8 +991,13 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
             let path_str = path.to_string();
             info!("User selected: {}", path_str);
 
-            match tokio::task::spawn_blocking(move || validate_audio_file(Path::new(&path_str)))
-                .await.map_err(|e| format!("Audio validation task failed: {e}"))? {
+            let resources = app.state::<crate::state::AppState>().jobs.resources();
+            match tokio::task::spawn_blocking(move || {
+                validate_audio_file(Path::new(&path_str), &resources)
+            })
+            .await
+            .map_err(|e| format!("Audio validation task failed: {e}"))?
+            {
                 Ok(info) => Ok(Some(info)),
                 Err(e) => {
                     error!("Validation failed: {}", e);
@@ -1002,10 +1014,15 @@ pub async fn select_and_validate_audio_command<R: Runtime>(
 
 /// Validate an audio file from a given path (for drag-drop)
 #[tauri::command]
-pub async fn validate_audio_file_command(path: String) -> Result<AudioFileInfo, String> {
+pub async fn validate_audio_file_command<R: Runtime>(
+    app: AppHandle<R>,
+    path: String,
+) -> Result<AudioFileInfo, String> {
     info!("Validating audio file: {}", path);
-    tokio::task::spawn_blocking(move || validate_audio_file(Path::new(&path)))
-        .await.map_err(|e| format!("Audio validation task failed: {e}"))?
+    let resources = app.state::<crate::state::AppState>().jobs.resources();
+    tokio::task::spawn_blocking(move || validate_audio_file(Path::new(&path), &resources))
+        .await
+        .map_err(|e| format!("Audio validation task failed: {e}"))?
         .map_err(|e| e.to_string())
 }
 
@@ -1120,9 +1137,8 @@ mod tests {
 
     #[test]
     fn test_validate_audio_file_with_metadata() {
-        let test_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/jfk.wav");
-        let info = validate_audio_file(&test_path)
+        let test_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/jfk.wav");
+        let info = validate_audio_file(&test_path, &crate::resources::ResourceScheduler::new())
             .expect("bundled WAV fixture must pass import validation");
         assert_eq!(info.format, "WAV");
         assert!(info.duration_seconds > 0.0);
@@ -1131,7 +1147,10 @@ mod tests {
 
     #[test]
     fn test_validate_audio_file_nonexistent() {
-        let result = validate_audio_file(Path::new("/nonexistent/file.mp4"));
+        let result = validate_audio_file(
+            Path::new("/nonexistent/file.mp4"),
+            &crate::resources::ResourceScheduler::new(),
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
@@ -1143,9 +1162,12 @@ mod tests {
         let temp_file = temp_dir.join("test_audio.txt");
         let _ = std::fs::write(&temp_file, b"dummy content");
 
-        let result = validate_audio_file(&temp_file);
+        let result = validate_audio_file(&temp_file, &crate::resources::ResourceScheduler::new());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unsupported format"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported format"));
 
         // Cleanup
         let _ = std::fs::remove_file(temp_file);

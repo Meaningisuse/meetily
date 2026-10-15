@@ -532,6 +532,8 @@ async fn start_recording(
             .map_err(|e| {
                 if e.starts_with("CONFLICT:") {
                     EnhancementError::new("CONFLICT", e.trim_start_matches("CONFLICT: "))
+                } else if e.starts_with("BUSY:") {
+                    EnhancementError::new("BUSY", e.trim_start_matches("BUSY: "))
                 } else {
                     EnhancementError::new("IO_ERROR", "Recording could not be started.")
                 }

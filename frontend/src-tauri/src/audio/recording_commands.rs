@@ -196,6 +196,26 @@ fn finalize_recording_start() {
 
 // Global recording manager and transcription task to keep them alive during recording
 static RECORDING_MANAGER: Mutex<Option<RecordingManager>> = Mutex::new(None);
+// Transferred with the active manager, retained through the entire stop tail.
+static RECORDING_RESOURCE: Mutex<Option<crate::resources::ResourceOperation>> = Mutex::new(None);
+
+async fn acquire_recording_resource<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<crate::resources::ResourceLease, String> {
+    if IS_RECORDING.load(Ordering::SeqCst) {
+        return Err("Recording already in progress".into());
+    }
+    let resources = app
+        .try_state::<crate::state::AppState>()
+        .ok_or("Database is not ready")?
+        .jobs
+        .resources();
+    let intent = resources.recording_intent()?;
+    let _=app.emit("recording-starting",serde_json::json!({"message":"Waiting for local tasks to finish; audio capture has not started (up to 15 seconds)..."}));
+    tokio::time::timeout(std::time::Duration::from_secs(15),intent.acquire()).await
+        .map_err(|_|"BUSY: Local work is still finishing. Recording has not started. Retry when it finishes.".to_string())?
+}
+
 static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 // Listener ID for proper cleanup - prevents microphone from staying active after recording stops
@@ -419,6 +439,7 @@ async fn start_recording_with_meeting_name_inner<R: Runtime>(
         meeting_name
     );
 
+    let recording_resource = acquire_recording_resource(&app).await?;
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
 
     // Check if already recording
@@ -524,6 +545,8 @@ async fn start_recording_with_meeting_name_inner<R: Runtime>(
     });
 
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
+    let resource_operation =
+        recording_resource.operation("Recording startup or stop cleanup was interrupted");
     let transcription_receiver = manager
         .start_recording(microphone_device, system_device, auto_save)
         .await
@@ -547,6 +570,7 @@ async fn start_recording_with_meeting_name_inner<R: Runtime>(
 
     // Flip recording live + reset per-session flags (speech-detected latch,
     // mic-recovery budget). Shared with the other start path — see helper.
+    *RECORDING_RESOURCE.lock().unwrap_or_else(|p| p.into_inner()) = Some(resource_operation);
     finalize_recording_start();
     drop(engine_lifecycle_guard);
 
@@ -651,6 +675,7 @@ async fn start_recording_with_devices_and_meeting_inner<R: Runtime>(
         mic_device_name, system_device_name, meeting_name
     );
 
+    let recording_resource = acquire_recording_resource(&app).await?;
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
 
     // Check if already recording
@@ -752,6 +777,8 @@ async fn start_recording_with_devices_and_meeting_inner<R: Runtime>(
     });
 
     // Start recording with specified devices and auto_save setting
+    let resource_operation =
+        recording_resource.operation("Recording startup or stop cleanup was interrupted");
     let transcription_receiver = manager
         .start_recording(mic_device, system_device, auto_save)
         .await
@@ -775,6 +802,7 @@ async fn start_recording_with_devices_and_meeting_inner<R: Runtime>(
 
     // Flip recording live + reset per-session flags (speech-detected latch,
     // mic-recovery budget). Shared with the other start path — see helper.
+    *RECORDING_RESOURCE.lock().unwrap_or_else(|p| p.into_inner()) = Some(resource_operation);
     finalize_recording_start();
     drop(engine_lifecycle_guard);
 
@@ -869,6 +897,10 @@ async fn stop_recording_inner<R: Runtime>(
         return Ok(());
     }
     let _session_cleanup = ActiveRecordingSessionCleanup;
+    let mut resource_operation = RECORDING_RESOURCE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
 
     // Emit shutdown progress to frontend
     let _ = app.emit(
@@ -911,6 +943,9 @@ async fn stop_recording_inner<R: Runtime>(
         .err()
         .map(|error| format!("Audio capture ended with an error: {error}"));
     if let Some(error) = &stop_error {
+        if let Some(resource) = resource_operation.as_ref() {
+            resource.uncertain("Recording capture/pipeline cleanup could not be confirmed");
+        }
         log::error!("{error}; draining workers and preserving remaining audio before returning.");
     }
 
@@ -967,6 +1002,9 @@ async fn stop_recording_inner<R: Runtime>(
                 info!("✅ Transcription worker joined; final saved-input status will be verified");
             }
             Ok(Err(e)) => {
+                if let Some(resource) = resource_operation.as_ref() {
+                    resource.uncertain("Recording transcription worker exited unexpectedly");
+                }
                 warn!("⚠️ Transcription task completed with error: {:?}", e);
                 // Continue anyway - the worker may have processed most chunks
             }
@@ -974,6 +1012,9 @@ async fn stop_recording_inner<R: Runtime>(
                 warn!("Transcription reached the stop budget; retaining unprocessed saved inputs and waiting for the active inference to finish safely.");
                 crate::audio::transcription::worker::cancel_pending_transcription();
                 if let Err(error) = task_handle.await {
+                    if let Some(resource) = resource_operation.as_ref() {
+                        resource.uncertain("Recording transcription worker exited unexpectedly");
+                    }
                     log::error!("Transcription worker join failed: {error}");
                 }
                 let _ = app.emit(
@@ -1230,6 +1271,9 @@ async fn stop_recording_inner<R: Runtime>(
                     "⚠️ Error during recording cleanup (transcripts preserved): {}",
                     e
                 );
+                if let Some(resource) = resource_operation.as_mut() {
+                    resource.finish();
+                }
                 IS_RECORDING.store(false, Ordering::SeqCst);
                 crate::tray::update_tray_menu(&app);
                 return Err(format!(
@@ -1248,6 +1292,10 @@ async fn stop_recording_inner<R: Runtime>(
         info!("ℹ️ No recording manager available for cleanup");
         (None, None)
     };
+
+    if let Some(resource) = resource_operation.as_mut() {
+        resource.finish();
+    }
 
     // Set recording flag to false
     info!("🔍 Setting IS_RECORDING to false");

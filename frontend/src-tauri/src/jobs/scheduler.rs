@@ -11,27 +11,39 @@ use tokio_util::sync::CancellationToken;
 pub struct JobService {
     pool: SqlitePool,
     slot: Arc<Semaphore>,
+    resources: crate::resources::ResourceScheduler,
     cancellations: Arc<DashMap<String, CancellationToken>>,
 }
 pub struct JobLease {
     pub context: JobContext,
     _permit: OwnedSemaphorePermit,
+    pub(crate) local: Option<crate::resources::ResourceLease>,
 }
 impl JobService {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool,
             slot: Arc::new(Semaphore::new(1)),
+            resources: crate::resources::ResourceScheduler::new(),
             cancellations: Arc::new(DashMap::new()),
         }
     }
-    pub(crate) fn try_audio_recovery_slot(&self) -> Result<OwnedSemaphorePermit, EnhancementError> {
-        self.slot.clone().try_acquire_owned().map_err(|_| {
-            EnhancementError::new(
-                "BUSY",
-                "Another heavy job is running. Retry saved audio when it finishes.",
-            )
-        })
+    pub fn resources(&self) -> crate::resources::ResourceScheduler {
+        self.resources.clone()
+    }
+    pub(crate) fn try_audio_recovery_slot(
+        &self,
+    ) -> Result<(OwnedSemaphorePermit, crate::resources::ResourceLease), EnhancementError> {
+        let permit = self
+            .slot
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| EnhancementError::new("BUSY", "Another heavy job is running."))?;
+        let local = self
+            .resources
+            .try_local()
+            .map_err(|e| EnhancementError::new("BUSY", &e))?;
+        Ok((permit, local))
     }
     pub async fn enqueue(
         &self,
@@ -123,6 +135,23 @@ impl JobService {
             _=token.cancelled()=>return Err(EnhancementError::new("CANCELLED","Job was cancelled.")),
             permit=self.slot.clone().acquire_owned()=>permit.map_err(|_|EnhancementError::new("NOT_READY","Scheduler is closed."))?,
         };
+        let params: String =
+            sqlx::query_scalar("SELECT params_json FROM enhancement_jobs WHERE id=?")
+                .bind(id)
+                .fetch_one(&self.pool)
+                .await?;
+        let params: Value = serde_json::from_str(&params).unwrap_or(Value::Null);
+        let local = if crate::resources::summary_uses_local_resources(
+            params["provider"].as_str().unwrap_or(""),
+        ) {
+            Some(tokio::select! {
+                biased;
+                _=token.cancelled()=>return Err(EnhancementError::new("CANCELLED","Job was cancelled.")),
+                local=self.resources.local()=>local.map_err(|e|EnhancementError::new("BUSY",&e))?,
+            })
+        } else {
+            None
+        };
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let status: String = sqlx::query_scalar("SELECT status FROM enhancement_jobs WHERE id=?")
             .bind(id)
@@ -173,6 +202,7 @@ impl JobService {
                 cancellation: token,
             },
             _permit: permit,
+            local,
         })
     }
     pub async fn get(&self, id: &str) -> Result<JobSnapshot, EnhancementError> {

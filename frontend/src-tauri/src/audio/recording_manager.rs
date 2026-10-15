@@ -28,6 +28,18 @@ pub(crate) enum RecordingStartError {
     Other(#[from] anyhow::Error),
 }
 
+/// Both cleanup attempts have already run; never turn either failure into an idle resource.
+pub(crate) fn capture_cleanup_result(streams: Result<()>, pipeline: Result<()>) -> Result<()> {
+    match (streams, pipeline) {
+        (Ok(()), Ok(())) => Ok(()),
+        (streams, pipeline) => Err(anyhow::anyhow!(
+            "Capture cleanup unconfirmed: streams={:?}; pipeline={:?}",
+            streams.err(),
+            pipeline.err()
+        )),
+    }
+}
+
 // ============================================================================
 // macOS Core Audio "pre-wake" — ported from feat/audio-device-handling
 // (commit 8bf6af8b, with refinements from d266feac + 7107adc7 + a10f8e55).
@@ -351,23 +363,14 @@ impl RecordingManager {
         // Stop recording state first - this clears device references
         self.state.stop_recording();
 
-        // Stop audio streams immediately
-        if let Err(e) = self.stream_manager.stop_streams() {
-            error!("Error stopping audio streams: {}", e);
-        }
-
-        // CRITICAL: Force pipeline to flush ALL accumulated audio before stopping
-        debug!("💨 Forcing pipeline to flush accumulated audio immediately");
-        if let Err(e) = self.pipeline_manager.force_flush_and_stop().await {
-            error!("Error during force flush: {}", e);
-        }
-
+        let streams = self.stream_manager.stop_streams();
+        debug!("Forcing pipeline to flush accumulated audio immediately");
+        let pipeline = self.pipeline_manager.force_flush_and_stop().await;
         // CRITICAL: Full cleanup to release all Arc references and resources
         // This ensures microphone is released even if Drop is delayed
         self.state.cleanup();
 
-        info!("✅ Recording streams stopped with immediate flush completed");
-        Ok(())
+        capture_cleanup_result(streams, pipeline)
     }
 
     /// Save recording after transcription is complete
@@ -636,5 +639,44 @@ mod wake_tests {
         // Nonexistent device name fails at the `find` step — no audio hardware needed.
         // Asserts the wake is non-fatal (returns Err, does not panic).
         assert!(wake_audio_connection_sync("__no_such_device__").is_err());
+    }
+}
+
+#[cfg(test)]
+mod resource_cleanup_tests {
+    use super::*;
+    #[tokio::test]
+    async fn failed_stream_or_pipeline_cleanup_cannot_release_resource_as_idle() {
+        for pipeline_failed in [false, true] {
+            let scheduler = crate::resources::ResourceScheduler::new();
+            let lease = scheduler.try_local().unwrap();
+            let operation = lease.operation("capture cleanup unconfirmed");
+            let streams = if pipeline_failed {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("injected stream failure"))
+            };
+            let pipeline = if pipeline_failed {
+                Err(anyhow::anyhow!("injected pipeline failure"))
+            } else {
+                Ok(())
+            };
+            assert!(capture_cleanup_result(streams, pipeline).is_err());
+            drop(operation);
+            drop(lease);
+            assert!(scheduler.recording_intent().is_err());
+            assert!(scheduler.try_local().is_err());
+        }
+    }
+    #[test]
+    fn confirmed_capture_cleanup_restores_resource_admission() {
+        let scheduler = crate::resources::ResourceScheduler::new();
+        let lease = scheduler.try_local().unwrap();
+        let mut operation = lease.operation("capture cleanup");
+        capture_cleanup_result(Ok(()), Ok(())).unwrap();
+        operation.finish();
+        drop(operation);
+        drop(lease);
+        assert!(scheduler.try_local().is_ok());
     }
 }

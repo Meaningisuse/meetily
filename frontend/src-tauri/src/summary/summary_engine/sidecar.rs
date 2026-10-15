@@ -73,6 +73,24 @@ impl Drop for RequestGuard {
     }
 }
 
+/// Keep ownership until an exit status is observed, including after SIGKILL.
+async fn confirm_child_exit(child: &mut Child, grace: Duration) -> Result<()> {
+    match tokio::time::timeout(grace, child.wait()).await {
+        Ok(Ok(status)) => {
+            log::info!("Sidecar exited with status: {}", status);
+        }
+        Ok(Err(error)) => return Err(anyhow!("Failed to confirm sidecar exit: {error}")),
+        Err(_) => {
+            child.start_kill().context("Failed to kill sidecar")?;
+            tokio::time::timeout(Duration::from_secs(3), child.wait())
+                .await
+                .map_err(|_| anyhow!("Timed out confirming killed sidecar exit"))?
+                .context("Failed to confirm killed sidecar exit")?;
+        }
+    }
+    Ok(())
+}
+
 impl SidecarManager {
     /// Create a new sidecar manager
     pub fn new(_app_data_dir: PathBuf) -> Result<Self> {
@@ -480,11 +498,11 @@ impl SidecarManager {
         // Send shutdown command
         if self.is_healthy() {
             let request = serde_json::json!({"type": "shutdown"}).to_string();
-            let _timeout = Duration::from_secs(5);
+            let shutdown_timeout = Duration::from_secs(5);
 
             // Try to send shutdown command, but ignore errors
             // We don't use send_request to avoid incrementing counter
-            let _ = async {
+            let _ = tokio::time::timeout(shutdown_timeout, async {
                 let mut stdin_lock = self.stdin_writer.lock().await;
                 if let Some(stdin) = stdin_lock.as_mut() {
                     stdin.write_all(request.as_bytes()).await?;
@@ -492,25 +510,16 @@ impl SidecarManager {
                     stdin.flush().await?;
                 }
                 Ok::<(), anyhow::Error>(())
-            }.await;
+            })
+            .await;
         }
 
         // Kill process if still running
         {
             let mut child_lock = self.child_process.lock().await;
-            if let Some(mut child) = child_lock.take() {
-                match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
-                    Ok(Ok(status)) => {
-                        log::info!("Sidecar exited with status: {}", status);
-                    }
-                    Ok(Err(e)) => {
-                        log::error!("Failed to wait for sidecar: {}", e);
-                    }
-                    Err(_) => {
-                        log::warn!("Sidecar didn't exit gracefully, killing");
-                        let _ = child.kill().await;
-                    }
-                }
+            if let Some(child) = child_lock.as_mut() {
+                confirm_child_exit(child, Duration::from_secs(3)).await?;
+                child_lock.take();
             }
         }
 
@@ -666,5 +675,33 @@ impl Drop for SidecarManager {
         // Note: Actual cleanup happens in shutdown() method
         // We can't do async work in Drop, so this is best-effort
         log::debug!("SidecarManager dropped");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod resource_shutdown_tests {
+    use super::*;
+    #[tokio::test]
+    async fn shutdown_confirms_synthetic_child_exit_before_releasing_resource() {
+        let scheduler = crate::resources::ResourceScheduler::new();
+        let lease = scheduler.try_local().unwrap();
+        let mut operation = lease.operation("helper cleanup not confirmed");
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "exec sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        assert!(scheduler.try_local().is_err());
+        confirm_child_exit(&mut child, Duration::from_millis(10))
+            .await
+            .unwrap();
+        assert!(child.try_wait().unwrap().is_some());
+        operation.finish();
+        drop(operation);
+        drop(lease);
+        assert!(scheduler.try_local().is_ok());
     }
 }

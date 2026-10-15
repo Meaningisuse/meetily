@@ -23,6 +23,34 @@ async fn await_or_cancel<T>(
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum LocalRequestState {
+    NotStarted,
+    InFlight,
+    Drained,
+}
+tokio::task_local! { static LOCAL_REQUEST_STATE: std::cell::Cell<LocalRequestState>; }
+fn mark_request_started() {
+    let _ = LOCAL_REQUEST_STATE.try_with(|state| state.set(LocalRequestState::InFlight));
+}
+async fn read_response_text(
+    response: reqwest::Response,
+    token: Option<&CancellationToken>,
+) -> Result<String, String> {
+    let text = await_or_cancel(response.text(), token)
+        .await?
+        .map_err(|e| format!("Failed to read LLM response: {e}"))?;
+    let _ = LOCAL_REQUEST_STATE.try_with(|state| state.set(LocalRequestState::Drained));
+    Ok(text)
+}
+async fn read_response_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    token: Option<&CancellationToken>,
+) -> Result<T, String> {
+    let text = read_response_text(response, token).await?;
+    serde_json::from_str(&text).map_err(|e| format!("Invalid LLM JSON response: {e}"))
+}
+
 // Generic structure for OpenAI-compatible API chat messages
 #[derive(Debug, Serialize)]
 pub struct ChatMessage {
@@ -247,6 +275,79 @@ pub(crate) async fn generate_summary_with_context(
     cancellation_token: Option<&CancellationToken>,
     model_context: usize,
 ) -> Result<LlmCompletion, String> {
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err("Summary generation was cancelled".into());
+    }
+    let local = crate::resources::summary_uses_local_resources(provider_name(provider));
+    let mut guard = if local {
+        crate::resources::local_inference_guard()?
+    } else {
+        None
+    };
+    // Cancellation stops subsequent chunks. Keep the current local request alive
+    // through its response body; dropping HTTP does not stop external inference.
+    let (result, request_state) = LOCAL_REQUEST_STATE
+        .scope(std::cell::Cell::new(LocalRequestState::NotStarted), async {
+            let result = generate_summary_with_context_inner(
+                client,
+                provider,
+                model_name,
+                api_key,
+                system_prompt,
+                user_prompt,
+                ollama_endpoint,
+                custom_openai_endpoint,
+                max_tokens,
+                temperature,
+                top_p,
+                app_data_dir,
+                if local { None } else { cancellation_token },
+                model_context,
+            )
+            .await;
+            (result, LOCAL_REQUEST_STATE.with(|state| state.get()))
+        })
+        .await;
+    let confirmed = if *provider == LLMProvider::BuiltInAI {
+        match crate::summary::summary_engine::force_shutdown_sidecar().await {
+            Ok(()) => true,
+            Err(error) => {
+                return Err(format!(
+                    "Local helper cleanup could not be confirmed: {error}"
+                ));
+            }
+        }
+    } else {
+        request_state != LocalRequestState::InFlight
+    };
+    if confirmed {
+        if let Some(guard) = guard.as_mut() {
+            guard.finish();
+        }
+    }
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err("Summary generation was cancelled".into());
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn generate_summary_with_context_inner(
+    client: &Client,
+    provider: &LLMProvider,
+    model_name: &str,
+    api_key: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    ollama_endpoint: Option<&str>,
+    custom_openai_endpoint: Option<&str>,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    app_data_dir: Option<&PathBuf>,
+    cancellation_token: Option<&CancellationToken>,
+    model_context: usize,
+) -> Result<LlmCompletion, String> {
     if provider != &LLMProvider::Ollama {
         return generate_summary(
             client,
@@ -275,6 +376,7 @@ pub(crate) async fn generate_summary_with_context(
             .trim_end_matches('/')
     );
     let body = serde_json::json!({"model":model_name,"messages":[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],"stream":false,"options":{"num_ctx":model_context,"num_predict":max_tokens.unwrap_or(512)}});
+    mark_request_started();
     let response = await_or_cancel(
         client
             .post(url)
@@ -287,11 +389,10 @@ pub(crate) async fn generate_summary_with_context(
     .map_err(|e| format!("Ollama request failed: {e}"))?;
     if !response.status().is_success() {
         let status = response.status();
+        read_response_text(response, cancellation_token).await?;
         return Err(format!("Ollama returned HTTP{status}"));
     }
-    let value: serde_json::Value = await_or_cancel(response.json(), cancellation_token)
-        .await?
-        .map_err(|e| format!("Invalid Ollama response: {e}"))?;
+    let value: serde_json::Value = read_response_json(response, cancellation_token).await?;
     if value["done"] != true || value["done_reason"] == "length" {
         return Err("Ollama output is incomplete; original source preserved".into());
     }
@@ -498,6 +599,7 @@ pub(crate) async fn generate_summary(
     );
 
     // Send request with timeout and cancellation support
+    mark_request_started();
     let request_future = client
         .post(api_url.clone())
         .headers(headers.clone())
@@ -541,9 +643,7 @@ pub(crate) async fn generate_summary(
         response
     } else {
         let status = response.status();
-        let error_body = await_or_cancel(response.text(), cancellation_token)
-            .await?
-            .unwrap_or_else(|error| format!("Failed to read LLM error response body: {error}"));
+        let error_body = read_response_text(response, cancellation_token).await?;
         if provider != &LLMProvider::Ollama || !ollama_rejects_reasoning_effort(status, &error_body)
         {
             return Err(format!(
@@ -558,6 +658,7 @@ pub(crate) async fn generate_summary(
             .as_object_mut()
             .ok_or_else(|| "Failed to prepare Ollama compatibility retry".to_string())?
             .remove("reasoning_effort");
+        mark_request_started();
         let retry_future = client
             .post(api_url)
             .headers(headers)
@@ -580,9 +681,7 @@ pub(crate) async fn generate_summary(
 
     if !response.status().is_success() {
         let status = response.status();
-        let error_body = await_or_cancel(response.text(), cancellation_token)
-            .await?
-            .unwrap_or_else(|error| format!("Failed to read LLM error response body: {error}"));
+        let error_body = read_response_text(response, cancellation_token).await?;
         return Err(format!(
             "LLM API request failed with status {}: {}",
             status, error_body
@@ -592,9 +691,7 @@ pub(crate) async fn generate_summary(
     // Parse response based on provider
     if provider == &LLMProvider::Claude {
         let chat_response =
-            await_or_cancel(response.json::<ClaudeChatResponse>(), cancellation_token)
-                .await?
-                .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
+            read_response_json::<ClaudeChatResponse>(response, cancellation_token).await?;
 
         info!("🐞 LLM Response received from Claude");
 
@@ -603,9 +700,8 @@ pub(crate) async fn generate_summary(
             .ok_or("No text content in LLM response")?;
         Ok(completion)
     } else {
-        let chat_response = await_or_cancel(response.json::<ChatResponse>(), cancellation_token)
-            .await?
-            .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
+        let chat_response =
+            read_response_json::<ChatResponse>(response, cancellation_token).await?;
 
         info!("🐞 LLM Response received from {}", provider_name(provider));
         chat_response.completion()
@@ -624,6 +720,228 @@ mod tests {
         time::{timeout, Duration},
     };
 
+    #[tokio::test]
+    async fn cancelled_local_http_keeps_recording_blocked_until_response_body_drains() {
+        for provider in [LLMProvider::Ollama, LLMProvider::CustomOpenAI] {
+            let resources = crate::resources::ResourceScheduler::new();
+            let lease = resources.try_local().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let native = provider == LLMProvider::Ollama;
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                read_http_request(&mut socket).await;
+                let body = if native {
+                    r#"{"message":{"content":"Complete"},"done":true}"#
+                } else {
+                    r#"{"choices":[{"message":{"content":"Complete"}}]}"#
+                };
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await.unwrap();
+                ready_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                socket.write_all(body.as_bytes()).await.unwrap();
+            });
+            let token = CancellationToken::new();
+            let worker_token = token.clone();
+            let mut job = tokio::spawn(crate::resources::LOCAL_WORK.scope(lease, async move {
+                generate_summary_with_context(
+                    &Client::new(),
+                    &provider,
+                    "test",
+                    "",
+                    "system",
+                    "user",
+                    Some(&endpoint),
+                    Some(&endpoint),
+                    Some(64),
+                    None,
+                    None,
+                    None,
+                    Some(&worker_token),
+                    4096,
+                )
+                .await
+            }));
+            timeout(Duration::from_secs(2), ready_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            token.cancel();
+            let intent = resources.recording_intent().unwrap();
+            assert!(timeout(Duration::from_millis(30), &mut job).await.is_err());
+            assert!(resources.try_local().is_err());
+            release_tx.send(()).unwrap();
+            assert!(timeout(Duration::from_secs(2), job)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err()
+                .contains("cancelled"));
+            server.await.unwrap();
+            let recording = timeout(Duration::from_secs(2), intent.acquire())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(recording);
+            assert!(resources.try_local().is_ok());
+        }
+    }
+    #[tokio::test]
+    async fn broken_local_http_response_does_not_admit_recording() {
+        let resources = crate::resources::ResourceScheduler::new();
+        let lease = resources.try_local().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_http_request(&mut socket).await;
+            // Server may still compute even though its client connection breaks.
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{")
+                .await
+                .unwrap();
+        });
+        let result = crate::resources::LOCAL_WORK
+            .scope(
+                lease,
+                generate_summary_with_context(
+                    &Client::new(),
+                    &LLMProvider::Ollama,
+                    "test",
+                    "",
+                    "system",
+                    "user",
+                    Some(&endpoint),
+                    None,
+                    Some(64),
+                    None,
+                    None,
+                    None,
+                    None,
+                    4096,
+                ),
+            )
+            .await;
+        server.await.unwrap();
+        assert!(result.is_err());
+        assert!(resources.recording_intent().is_err());
+        assert!(resources.local().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn local_preflight_and_completed_business_failures_do_not_poison_resources() {
+        let resources = crate::resources::ResourceScheduler::new();
+        let lease = resources.try_local().unwrap();
+        let result = crate::resources::LOCAL_WORK
+            .scope(
+                lease,
+                generate_summary_with_context(
+                    &Client::new(),
+                    &LLMProvider::Ollama,
+                    "test",
+                    "",
+                    "system",
+                    "user",
+                    None,
+                    None,
+                    Some(64),
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                ),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(resources.try_local().is_ok());
+        for (status, body) in [
+            (
+                "200 OK",
+                r#"{"message":{"content":"Truncated"},"done":true,"done_reason":"length"}"#,
+            ),
+            ("200 OK", r#"{"malformed":"but fully read"}"#),
+            ("500 Internal Server Error", r#"{"error":"Model failed"}"#),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                read_http_request(&mut socket).await;
+                socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            });
+            let lease = resources.try_local().unwrap();
+            let result = crate::resources::LOCAL_WORK
+                .scope(
+                    lease,
+                    generate_summary_with_context(
+                        &Client::new(),
+                        &LLMProvider::Ollama,
+                        "test",
+                        "",
+                        "system",
+                        "user",
+                        Some(&endpoint),
+                        None,
+                        Some(64),
+                        None,
+                        None,
+                        None,
+                        None,
+                        4096,
+                    ),
+                )
+                .await;
+            assert!(result.is_err());
+            server.await.unwrap();
+            assert!(resources.try_local().is_ok());
+        }
+    }
+    #[tokio::test]
+    async fn dropped_local_inference_waiter_keeps_resource_uncertain() {
+        let resources = crate::resources::ResourceScheduler::new();
+        let lease = resources.try_local().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (finish_tx, finish_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_http_request(&mut socket).await;
+            ready_tx.send(()).unwrap();
+            finish_rx.await.unwrap();
+        });
+        let job = tokio::spawn(crate::resources::LOCAL_WORK.scope(lease, async move {
+            generate_summary_with_context(
+                &Client::new(),
+                &LLMProvider::Ollama,
+                "test",
+                "",
+                "system",
+                "user",
+                Some(&endpoint),
+                None,
+                Some(64),
+                None,
+                None,
+                None,
+                None,
+                4096,
+            )
+            .await
+        }));
+        timeout(Duration::from_secs(2), ready_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        job.abort();
+        assert!(job.await.unwrap_err().is_cancelled());
+        assert!(resources.recording_intent().is_err());
+        finish_tx.send(()).unwrap();
+        server.await.unwrap();
+    }
     async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 1024];
