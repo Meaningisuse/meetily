@@ -3,6 +3,8 @@ pub mod commands;
 mod discovery;
 pub mod events;
 pub mod idempotency;
+#[cfg(test)]
+mod job_request_tests;
 pub mod outbox;
 pub mod read_service;
 pub mod server;

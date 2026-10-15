@@ -433,11 +433,14 @@ async fn create_summary_job(
             "Desktop state is unavailable.",
         ))
     })?;
-    let key = idempotency_key(&headers)?;
     let payload = serde_json::to_value(&request)
         .map_err(|_| ApiError(EnhancementError::invalid("Invalid request body.")))?;
-    let response =
-        super::idempotency::run(&state.pool, &client.id, &key, &payload, || async move {
+    create_summary_job_with_action(
+        state.pool,
+        client.id,
+        headers,
+        payload,
+        move || async move {
             let app_state = app.try_state::<crate::state::AppState>().ok_or_else(|| {
                 EnhancementError::new("NOT_READY", "Desktop state is unavailable.")
             })?;
@@ -458,8 +461,29 @@ async fn create_summary_job(
             )
             .await
             .map_err(|error| command_error(error).0)
-        })
-        .await?;
+        },
+    )
+    .await
+}
+
+// Share request ownership with database-backed, provider-free regression tests.
+pub(super) async fn create_summary_job_with_action<F, Fut>(
+    pool: SqlitePool,
+    client_id: String,
+    headers: axum::http::HeaderMap,
+    payload: serde_json::Value,
+    action: F,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<
+            Output = Result<crate::summary::commands::ProcessTranscriptResponse, EnhancementError>,
+        > + Send
+        + 'static,
+{
+    let key = idempotency_key(&headers)?;
+    let response =
+        super::idempotency::run_detached(&pool, &client_id, &key, &payload, action).await?;
     Ok(Json(serde_json::to_value(response).unwrap_or_default()))
 }
 
@@ -475,16 +499,33 @@ async fn cancel_job(
             "Desktop state is unavailable.",
         ))
     })?;
+    cancel_job_with_action(state.pool, client.id, id, headers, move |id| async move {
+        let app_state = app
+            .try_state::<crate::state::AppState>()
+            .ok_or_else(|| EnhancementError::new("NOT_READY", "Desktop state is unavailable."))?;
+        app_state.jobs.cancel(&id).await
+    })
+    .await
+}
+
+pub(super) async fn cancel_job_with_action<F, Fut>(
+    pool: SqlitePool,
+    client_id: String,
+    id: String,
+    headers: axum::http::HeaderMap,
+    action: F,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    F: FnOnce(String) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<crate::jobs::JobSnapshot, EnhancementError>>
+        + Send
+        + 'static,
+{
     let key = idempotency_key(&headers)?;
     let payload = serde_json::json!({"job_id":id,"operation":"cancel"});
     let response =
-        super::idempotency::run(&state.pool, &client.id, &key, &payload, || async move {
-            let app_state = app.try_state::<crate::state::AppState>().ok_or_else(|| {
-                EnhancementError::new("NOT_READY", "Desktop state is unavailable.")
-            })?;
-            app_state.jobs.cancel(&id).await
-        })
-        .await?;
+        super::idempotency::run_detached(&pool, &client_id, &key, &payload, move || action(id))
+            .await?;
     Ok(Json(serde_json::to_value(response).unwrap_or_default()))
 }
 

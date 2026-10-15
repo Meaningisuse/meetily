@@ -108,7 +108,7 @@ AppState.jobs持有实例级ResourceScheduler，录音、本地摘要、导入�
 - 最终`scripts/check-enhancement.sh --native`退出0，391项中385通过、0失败、6忽略，22.00秒。使用既有CMake及进程级Xcode覆盖；helper1条、build script1条、lib test11条warning未影响退出码。未安装依赖，未改全局环境。
 - Astra完成只读方案与代码复核，主代理实现及设计回归，Luna执行RED、定向GREEN和完整原生检查。测试共用生产HTTP guard及action helper，以合成action代替设备初始化；字段校验与锁内读取session由源代码结构复核，不将其写成已完成设备验收。
 
-超时后录音仍可能开始，客户端应使用原key及相同请求体重试取得session，不能当作未执行而自动换key。文档同步见[原生HTTP开始录音](INTERNAL_AUTOMATION.md#原生-http-开始录音与超时重试)。测试未启动设备、加载模型、访问真实会议或Keychain，也没有打包／启动.app；panic、结果写入失败及应用退出后恢复仍沿用保守边界。本项不宣称所有写API均已取消安全：摘要创建与普通任务取消的内联执行缺口仍需独立修复。
+超时后录音仍可能开始，客户端应使用原key及相同请求体重试取得session，不能当作未执行而自动换key。文档同步见[原生HTTP开始录音](INTERNAL_AUTOMATION.md#原生-http-开始录音与超时重试)。测试未启动设备、加载模型、访问真实会议或Keychain，也没有打包／启动.app；panic、结果写入失败及应用退出后恢复仍沿用保守边界。此项仅处理start；摘要创建与普通任务取消的后续独立修复见下文。
 
 ## 2026-10-15 摘要人工保存一致性
 
@@ -120,6 +120,17 @@ AppState.jobs持有实例级ResourceScheduler，录音、本地摘要、导入�
 - Sol实现代理负责此项源代码与测试，主代理核对保存路径与最终日志，Astra只读复核，Luna执行RED和最终验证。并行API开始录音的完整原生检查另行记录；此项只改前端，不重复原生测试。
 
 测试隔离原生invoke、上下文与BlockNote解析／视图边界，保留真实hook、摘要保存编排和编辑状态处理；没有读写真会议。真实BlockNote DOM、summary_json专用子编辑器交互、切换会议时在途保存、外部刷新覆盖草稿及重复并发保存的串行化不在本项验收范围。没有打包／启动.app或进行真实会议人工编辑验收。
+
+## 2026-10-15 API 摘要提交与任务取消的请求生命周期
+
+摘要任务创建和普通任务取消入口现将完整action纳入已有`run_detached`，覆盖幂等登记、摘要入队至后台执行者建立／真实取消以及响应持久化。生产handler委托原`api_process_transcript`和`jobs.cancel`的关系不变，owned闭包在内部取得AppState，不跨请求借用。字段校验、scope、payload哈希输入、错误映射和返回结构保持原样；未修改JobService、provider、录音start／stop或schema。
+
+- 红测：两个测试均编译成功且按预期失败，退出101、0通过／2失败；真实SQLite入队后abort等待者，attach／worker未继续建立；真实取消提交后abort等待者，响应未持久化。原始观察预算2秒，仅测试等待，不是生产HTTP期限。
+- 最终定向：`cargo test --locked -p meetily --lib automation::job_request_tests`退出0，3通过／0失败。覆盖真实queued与NULL登记、进行中同key BUSY、变更摘要body／取消job ID冲突且不进入action；abort后继续真实attach和受控worker至failed终态、原process／job ID响应落库、同key重放action严格1次且只建1个job；真实NOT_FOUND取消两次均清理登记并允许同key重试。最终测试等待预算5秒，生产20秒deadline未改。
+- 幂等定向7通过／0失败、退出0，包含结果写入失败及panic后未决登记、正常错误清理、在途／body保护与重放。最终`scripts/check-enhancement.sh --native`退出0，394项中388通过、0失败、6忽略，21.32秒。使用既有CMake及进程级Xcode覆盖；helper1条、build script1条、lib test11条warning未影响退出结果。未安装依赖。
+- Sol代理实现此独立项，主代理核对实际差异及日志，Astra完成只读方案／最终复核，Luna执行RED、定向GREEN与完整原生验证。此前前端人工保存的6项定向、86项全量、Node24类型检查与生产构建证据保持有效；本项没有前端改动，不重复执行。
+
+本项回归直接取消生产共用helper的等待者，未为这两路重复运行真实20秒HTTP中间件；录音start／stop的loopback期限用例在最终全量中通过。摘要attach／spawn是测试动作重建的真实JobService流程，worker使用受控失败动作，不能据此宣称完整`api_process_transcript`或真实provider集成验收。生产owned闭包含完整原command的关系经静态复核及Rust编译确认。没有访问用户会议、Keychain、设备或真实模型，没有打包／启动.app。进程退出、panic和响应保存失败仍不承诺自动完成或自动重发；超时重试规则见[HTTP摘要任务与取消](INTERNAL_AUTOMATION.md#原生-http-摘要任务与取消的超时重试)。
 
 ## P0 / F4 工程验证
 
