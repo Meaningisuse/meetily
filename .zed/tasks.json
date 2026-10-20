@@ -1,0 +1,50 @@
+[
+  {
+    "label": "Meetily: 前端开发（3118）",
+    "command": "pnpm",
+    "args": [
+      "dev"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT/frontend",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Meetily: 桌面开发（项目自动平台脚本）",
+    "command": "pnpm",
+    "args": [
+      "tauri:dev"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT/frontend",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Meetily: Rust 工作区完整检查",
+    "command": "cargo",
+    "args": [
+      "check",
+      "--workspace",
+      "--all-targets"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Meetily: 前端类型检查",
+    "command": "pnpm",
+    "args": [
+      "exec",
+      "tsc",
+      "--noEmit"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT/frontend",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  }
+]
